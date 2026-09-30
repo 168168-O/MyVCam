@@ -76,14 +76,14 @@ jobs:
         run: |
           set -euo pipefail
           make
-          mapfile -t libs < <(find . -path './.git' -prune -o -name 'MyVCamTweak.dylib' -print)
-          if [[ ${#libs[@]} -eq 0 ]]; then
-            echo "make finished without MyVCamTweak.dylib" >&2
+          merged=".theos/obj/debug/MyVCamTweak.dylib"
+          if [[ ! -f "$merged" ]]; then
+            echo "make finished without merged ${merged}" >&2
             exit 1
           fi
-          printf 'built %s\n' "${libs[@]}"
+          printf 'built %s\n' "$merged"
           mkdir -p artifacts
-          cp -v "${libs[@]}" artifacts/
+          cp -v "$merged" artifacts/MyVCamTweak.dylib
 
       - name: Package rootless .deb
         run: |
