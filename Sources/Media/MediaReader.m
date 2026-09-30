@@ -44,6 +44,7 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     CMTime _nominalFrameDuration;
     int32_t _frameIndex;
     BOOL _prepared;
+    NSError *_Nullable _lastError;
 }
 
 - (instancetype)initWithFileURL:(NSURL *)fileURL {
@@ -68,9 +69,9 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     os_unfair_lock_unlock(&_lock);
 }
 
-- (NSError *)lastError {
+- (NSError *_Nullable)lastError {
     os_unfair_lock_lock(&_lock);
-    NSError *error = _lastError;
+    NSError *_Nullable error = _lastError;
     os_unfair_lock_unlock(&_lock);
     return error;
 }
@@ -175,10 +176,20 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     }
 
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:fileURL options:nil];
-    [asset loadValuesSynchronouslyForKeys:@[@"tracks"]];
-    NSError *tracksError = nil;
-    AVKeyValueStatus tracksStatus = [asset statusOfValueForKey:@"tracks" error:&tracksError];
-    if (tracksStatus != AVKeyValueStatusLoaded) {
+    // iPhoneOS 16.5 has no -loadValuesSynchronouslyForKeys:. This is the
+    // supported iOS 15+ tracks load; prepare stays synchronous by waiting.
+    dispatch_semaphore_t tracksLoaded = dispatch_semaphore_create(0);
+    __block NSArray<AVAssetTrack *> *videoTracks = nil;
+    __block NSError *tracksError = nil;
+    [asset loadTracksWithMediaType:AVMediaTypeVideo
+                 completionHandler:^(NSArray<AVAssetTrack *> *_Nullable tracks,
+                                     NSError *_Nullable loadError) {
+        videoTracks = tracks;
+        tracksError = loadError;
+        dispatch_semaphore_signal(tracksLoaded);
+    }];
+    dispatch_semaphore_wait(tracksLoaded, DISPATCH_TIME_FOREVER);
+    if (tracksError != nil) {
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
                              description:@"Could not load tracks for the media file."
@@ -187,11 +198,7 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
         return NO;
     }
 
-    AVAssetTrack *track = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
-#pragma clang diagnostic pop
+    AVAssetTrack *track = videoTracks.firstObject;
     if (track == nil) {
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeNoVideoTrack
@@ -225,15 +232,17 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     AVAssetReaderTrackOutput *output =
         [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:settings];
     output.alwaysCopiesSampleData = YES;
-    if (![reader addOutput:output]) {
+    // -addOutput: returns void on this SDK and throws if the output is refused.
+    if (![reader canAddOutput:output]) {
         [reader cancelReading];
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
                              description:@"Could not add the video track output to AVAssetReader."
-                              underlying:nil];
+                              underlying:reader.error];
         }
         return NO;
     }
+    [reader addOutput:output];
     if (![reader startReading]) {
         NSError *startError = reader.error;
         [reader cancelReading];
