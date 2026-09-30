@@ -32,7 +32,7 @@ Still out of MyVCam:
 - DiCoyServer / IPC / Mach XPC
 - Screen mirror and the daemon IOSurface path
 - Preferences UI
-- AVFoundation capture hooks. Phase A arms a local flag and Phase B calls that injector. The hooks themselves stay out
+- AVFoundation capture hooks that replace a sample buffer. C1-A logs the delegate callback and passes the original `sampleBuffer` through. Phase A arms a local flag and Phase B calls that injector. Buffer replacement stays out
 
 ### MurkAskA01/ios-vcam
 
@@ -44,7 +44,11 @@ Repository: https://github.com/MurkAskA01/ios-vcam
 
 Repository: https://github.com/EthanArbuckle/vcam-ios
 
-Listed so the mediaserverd / `BWNodeOutput` path stays deferred. The placeholder filter still does not name `mediaserverd`.
+Listed so the mediaserverd / `BWNodeOutput` path stays deferred. C1-A filters `com.apple.camera` only and does not name `mediaserverd`.
+
+## C1-A
+
+`Tweak.x` follows the DiCoy / ios-vcam shape: hook `AVCaptureVideoDataOutput`'s `setSampleBufferDelegate:queue:`, then hook the delegate class's `captureOutput:didOutputSampleBuffer:fromConnection:` once. C1-A logs that the delegate hook fired (`[MyVCam C1-A]`) and calls the original IMP with the original sample buffer. It does not replace the buffer, call `VideoInjector`, or hook mediaserverd / `BWNodeOutput`. The filter is `com.apple.camera` only.
 
 ## Layering
 

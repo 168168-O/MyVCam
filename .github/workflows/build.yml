@@ -122,6 +122,10 @@ jobs:
               exit 1
             fi
           done
+          if ! grep -a -F '[MyVCam C1-A]' "$merged"; then
+            echo "merged dylib is missing the C1-A log prefix" >&2
+            exit 1
+          fi
           mkdir -p artifacts
           cp -v "$merged" artifacts/MyVCamTweak.dylib
 
@@ -175,8 +179,12 @@ jobs:
             echo "deb layout is missing the tweak dylib or plist" >&2
             exit 1
           fi
-          if ! grep -q '<string>com.myvcam.stage21.placeholder</string>' "${plists[0]}"; then
-            echo "packaged filter is not the placeholder bundle" >&2
+          if ! grep -q '<string>com.apple.camera</string>' "${plists[0]}"; then
+            echo "packaged filter is not com.apple.camera" >&2
+            exit 1
+          fi
+          if grep -q 'com.myvcam.stage21.placeholder' "${plists[0]}"; then
+            echo "packaged filter still contains the placeholder bundle" >&2
             exit 1
           fi
           if grep -E '<string>[^<]*(mediaserverd|SpringBoard)[^<]*</string>' "${plists[0]}"; then

@@ -7,13 +7,10 @@
 		<key>Bundles</key>
 		<array>
 			<!--
-			  Harmless placeholder. This bundle identifier is not a system
-			  daemon and not an App Store app, so the dylib is not injected
-			  anywhere yet.
-			  Keep this placeholder until a later device stage. Do not point
-			  it at mediaserverd, SpringBoard, or a camera client here.
+			  C1-A verifies the capture delegate hook inside Camera only.
+			  One bundle. The hook passes the original sample buffer through.
 			-->
-			<string>com.myvcam.stage21.placeholder</string>
+			<string>com.apple.camera</string>
 		</array>
 	</dict>
 </dict>
