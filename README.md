@@ -12,6 +12,18 @@ MyVCamManager
       → latest retained buffer, no hooks
 ```
 
+## C1-A — hook verify only
+
+`Tweak.x` hooks `-[AVCaptureVideoDataOutput setSampleBufferDelegate:queue:]`. When a delegate is set, it installs a one-time hook on the class that implements `-captureOutput:didOutputSampleBuffer:fromConnection:`. That hook logs once per delegate class and calls the original implementation with the same `sampleBuffer`. It does not replace, copy, or mutate the buffer. It does not call `VideoInjector` or `MyVCamManager`.
+
+`MyVCamTweak.plist` matches `com.apple.camera` only. This stage does not install the package and does not claim a device result. On a device, the hook fired when the log contains:
+
+```
+[MyVCam C1-A] captureOutput:didOutputSampleBuffer:fromConnection: fired class=<DelegateClass>
+```
+
+The install log is `[MyVCam C1-A] hooked captureOutput:didOutputSampleBuffer:fromConnection: on <Class>`. The `fired` line is the pass-through confirmation.
+
 `copyNextSampleBufferWithError:` stops at the sample buffer. `injectNextSampleBufferWithError:` borrows that buffer to `VideoInjector` and `CFRelease`s the original. Once armed, `injectSampleBuffer:error:` returns `YES` for a non-NULL buffer and `CFRetain`s it as the latest buffer. `NotPrepared` and `InvalidSampleBuffer` stay failures.
 
 GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and uploads `MyVCam-deb` and `MyVCam-dylib`. That compile does not install the package and does not feed a camera.
@@ -28,7 +40,10 @@ GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and
 ## What it does not do
 
 - Deliver a buffer to a camera, a capture session, or mediaserverd
-- AVFoundation or mediaserverd hooks, including `BWNodeOutput`
+- Replace, copy, or mutate the capture `sampleBuffer` in the C1-A delegate hook
+- Call `VideoInjector` or drive `MyVCamManager` from the tweak
+- mediaserverd hooks, including `BWNodeOutput`
+- Photo, preview, or audio capture hooks
 - Report inject success when `VideoInjector` returns `NotImplemented`
 - Loop playback, audio, rotation, or an origin camera buffer
 - RTSP, HLS, MJPEG, or Murk `AVAssetStreamAdapter`
@@ -36,7 +51,7 @@ GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and
 - Screen mirror
 - Anti-detection or runtime protection
 - A preferences UI
-- A real Substrate filter
+- A multi-process filter. C1-A matches `com.apple.camera` only
 
 `MyVCamFrameSource` includes `lastError` so end of media (`NULL` and a nil error) is distinct from a failed read. `MyVCamManager` uses that method and does not downcast to `MediaReader`.
 
@@ -54,7 +69,7 @@ The manager produces a sample buffer on the inject path through `copyNextSampleB
 
 ## How to pull frames
 
-`Tweak.x` still only constructs `[MyVCamManager sharedManager]`. It does not open a file. A later caller drives the chain:
+`Tweak.x` does not construct `MyVCamManager` and does not open a file. A later caller drives the chain:
 
 ```objc
 MyVCamManager *manager = [MyVCamManager sharedManager];
@@ -92,8 +107,8 @@ if ([manager startWithError:&error]) {
 | `Sources/Core/MyVCamFrameSource.h` | Protocol. `lastError` distinguishes end of media from failure. |
 | `Sources/Core/MyVCamFrame.h` `.m` | Unchanged thin carrier. Unused by the new chain. |
 | `Sources/Inject/VideoInjector.h` `.m` | Latest-buffer sink. `prepare` returns `YES`. Armed non-NULL `inject` retains `_latest` and returns `YES`. |
-| `MyVCamTweak/Tweak.x` | Unchanged `%ctor`. No `%hook`. |
-| `MyVCamTweak/MyVCamTweak.plist` | Still `com.myvcam.stage21.placeholder`. |
+| `MyVCamTweak/Tweak.x` | C1-A pass-through hook. Logs once per delegate class, then calls the original with the original `sampleBuffer`. |
+| `MyVCamTweak/MyVCamTweak.plist` | `com.apple.camera` only. |
 
 ## APIs
 
@@ -129,7 +144,7 @@ Detail is in [Docs/THIRD_PARTY_MAP.md](Docs/THIRD_PARTY_MAP.md).
 
 ## Filter
 
-`MyVCamTweak.plist` still matches `com.myvcam.stage21.placeholder` only. Phase B does not point it at a camera app or at `mediaserverd`.
+`MyVCamTweak.plist` matches `com.apple.camera` only. C1-A does not add a second bundle and does not name a media server.
 
 ## Build locally
 
