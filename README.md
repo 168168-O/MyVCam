@@ -1,6 +1,6 @@
 # MyVCam
 
-Phase B wires the local-file chain to `VideoInjector`. Phase A only arms that injector in memory. There is still no injection sink, so a borrowed inject still fails.
+Phase B wires the local-file chain to `VideoInjector`. The injector keeps the latest retained sample buffer. It still does not deliver that buffer to a camera or to mediaserverd.
 
 ```
 MyVCamManager
@@ -9,10 +9,10 @@ MyVCamManager
   → SampleBufferBuilder
       → CMSampleBuffer
   → VideoInjector
-      → borrowed buffer, no sink
+      → latest retained buffer, no hooks
 ```
 
-`copyNextSampleBufferWithError:` stops at the sample buffer. `injectNextSampleBufferWithError:` borrows that buffer to `VideoInjector` and `CFRelease`s it. Phase A `injectSampleBuffer:error:` returns `NO` with `NotImplemented` once armed. Phase B keeps that result a failure.
+`copyNextSampleBufferWithError:` stops at the sample buffer. `injectNextSampleBufferWithError:` borrows that buffer to `VideoInjector` and `CFRelease`s the original. Once armed, `injectSampleBuffer:error:` returns `YES` for a non-NULL buffer and `CFRetain`s it as the latest buffer. `NotPrepared` and `InvalidSampleBuffer` stay failures.
 
 GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and uploads `MyVCam-deb` and `MyVCam-dylib`. That compile does not install the package and does not feed a camera.
 
@@ -20,8 +20,8 @@ GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and
 
 - `MediaReader` opens a local file URL, selects the first video track, and decodes `32BGRA` pixel buffers.
 - `SampleBufferBuilder` wraps one pixel buffer in a `CMSampleBuffer`.
-- Phase A: `VideoInjector` `prepareWithError:` sets a local prepared flag and returns `YES`. That `YES` is local state. `injectSampleBuffer:error:` borrows a buffer and returns `NO`: `NotPrepared` before arming, `InvalidSampleBuffer` for `NULL`, `NotImplemented` when armed. `stop` clears the flag.
-- Phase B: `MyVCamManager` prepares the reader, then prepares the injector. `injectNextSampleBufferWithError:` produces one sample buffer, borrows it to the injector, and `CFRelease`s it on both success and failure. Injector `NotImplemented` stays a failure (`InjectFailed`, with that error underneath). End of media on this path is `EndOfMedia`. `copyNextSampleBufferWithError:` stays a pure producer: end of file is `NULL` and a nil error, and it does not call the injector.
+- `VideoInjector` `prepareWithError:` sets a local prepared flag and returns `YES`. That `YES` is local state. `injectSampleBuffer:error:` returns `NO` with `NotPrepared` before arming, even for `NULL`, and `InvalidSampleBuffer` for `NULL` once armed. A non-NULL buffer once armed is `CFRetain`ed as `_latest` (any previous latest is `CFRelease`d first) and the call returns `YES`. `stop` releases `_latest` and clears the flag. `dealloc` releases `_latest` if it is still set.
+- Phase B: `MyVCamManager` prepares the reader, then prepares the injector. `injectNextSampleBufferWithError:` produces one sample buffer, borrows it to the injector, and `CFRelease`s it on both success and failure. A `NO` from the injector stays a failure (`InjectFailed`, with that error underneath). A `YES` means the injector retained the latest buffer. End of media on this path is `EndOfMedia`. `copyNextSampleBufferWithError:` stays a pure producer: end of file is `NULL` and a nil error, and it does not call the injector.
 - `stop`, `detachMediaFile`, and `attachMediaFileURL:` reset the reader and stop the injector.
 - The tweak Makefile links `AVFoundation` in addition to `Foundation`, `CoreMedia`, and `CoreVideo`. Packaging stays rootless.
 
@@ -46,7 +46,7 @@ GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and
 
 - `MediaReader` only reads and only conforms to `MyVCamFrameSource`. It does not import `SampleBufferBuilder` or `VideoInjector`.
 - `SampleBufferBuilder` only converts `CVPixelBuffer` to `CMSampleBuffer`.
-- `VideoInjector` only injects. It does not decode and it does not build sample buffers. The buffer passed to `injectSampleBuffer:error:` is borrowed.
+- `VideoInjector` only injects. It does not decode and it does not build sample buffers. The buffer passed to `injectSampleBuffer:error:` is borrowed; the injector `CFRetain`s its latest copy.
 
 The manager produces a sample buffer on the inject path through `copyNextSampleBufferLockedWithError:`. That method assumes the state lock is already held. Calling the public copy method under that lock would deadlock.
 
@@ -74,8 +74,7 @@ if ([manager startWithError:&error]) {
 
 ```objc
 if ([manager startWithError:&error]) {
-    // NO while there is no sink. Code is InjectFailed.
-    // NSUnderlyingErrorKey is the injector error (NotImplemented once armed).
+    // YES when the injector retains the latest buffer.
     // End of the track is EndOfMedia, not a nil error.
     // The manager CFReleases the buffer it produced.
     [manager injectNextSampleBufferWithError:&error];
@@ -92,7 +91,7 @@ if ([manager startWithError:&error]) {
 | `Sources/Core/MyVCamManager.h` `.m` | Attach, prepare the reader and the injector, pull, and build. `injectNext` borrows one buffer and releases it. |
 | `Sources/Core/MyVCamFrameSource.h` | Protocol. `lastError` distinguishes end of media from failure. |
 | `Sources/Core/MyVCamFrame.h` `.m` | Unchanged thin carrier. Unused by the new chain. |
-| `Sources/Inject/VideoInjector.h` `.m` | Phase A local arm. `prepare` returns `YES`. `inject` still returns `NO`. |
+| `Sources/Inject/VideoInjector.h` `.m` | Latest-buffer sink. `prepare` returns `YES`. Armed non-NULL `inject` retains `_latest` and returns `YES`. |
 | `MyVCamTweak/Tweak.x` | Unchanged `%ctor`. No `%hook`. |
 | `MyVCamTweak/MyVCamTweak.plist` | Still `com.myvcam.stage21.placeholder`. |
 
@@ -110,8 +109,8 @@ if ([manager startWithError:&error]) {
 | `-[MediaReader presentationTimeOfLastFrame]` / `durationOfLastFrame` | Times of the last returned frame, else `kCMTimeInvalid`. |
 | `-[SampleBufferBuilder sampleBufferWithPixelBuffer:presentationTime:duration:error:]` | Retained image sample buffer, or `NULL` plus an error. |
 | `-[VideoInjector prepareWithError:]` | `YES`. Local prepared flag only. |
-| `-[VideoInjector injectSampleBuffer:error:]` | `NO`. Armed and non-`NULL` is `NotImplemented`. |
-| `-[VideoInjector stop]` | Clears the prepared flag. |
+| `-[VideoInjector injectSampleBuffer:error:]` | `NO` with `NotPrepared` or `InvalidSampleBuffer`. Armed and non-`NULL` retains `_latest` and returns `YES`. |
+| `-[VideoInjector stop]` | Releases `_latest` and clears the prepared flag. |
 
 End of file on `copyNextSampleBufferWithError:` is `NULL` with a nil error. The same end on `injectNextSampleBufferWithError:` is `NO` with `MyVCamManagerErrorCodeEndOfMedia`. A reader failure returns the frame source's `lastError`. `-[MediaReader copyNextPixelBuffer]` before `prepareWithError:` returns `NULL` with `MyVCamMediaReaderErrorCodeNotPrepared`, which is not end of file.
 
@@ -124,7 +123,7 @@ Ideas were adapted from public sources. This repository does not vendor those tr
 | `MediaReader` | DiCoy local `AVAssetReader` / first video track / BGRA output | Audio reader, wall-clock loop, rotation, hooks |
 | `SampleBufferBuilder` | DiCoy `buildSampleBufferMatchingBuffer` image-buffer create; Murk `_create_buffer` naming only | Origin camera buffer, EXIF/TIFF copy, format conversion, network adapters |
 | `MyVCamManager` | DiCoy `DiCoyTweakManager` as the object that owns the reader | Screen mirror, daemon, IPC, and any hook-based inject |
-| `VideoInjector` | Phase A local arm. Phase B manager calls prepare, a borrowed inject, and stop | DiCoy AVFoundation hooks; Ethan mediaserverd / `BWNodeOutput`; a real sink |
+| `VideoInjector` | Latest retained sample buffer. The manager calls prepare, inject, and stop | DiCoy AVFoundation hooks; Ethan mediaserverd / `BWNodeOutput` |
 
 Detail is in [Docs/THIRD_PARTY_MAP.md](Docs/THIRD_PARTY_MAP.md).
 

@@ -2,13 +2,17 @@
 //  VideoInjector.m
 //  MyVCam
 //
-//  Phase A local arming. No Substrate hooks, no AVFoundation swizzles, no
-//  mediaserverd / BWNodeOutput path, and no sample-buffer sink.
+//  Latest-buffer sink. No Substrate hooks, no AVFoundation swizzles, and no
+//  mediaserverd / BWNodeOutput path.
 //
 //  prepareWithError: sets _prepared under the lock and returns YES. That is
-//  not camera injection. injectSampleBuffer:error: reads the flag, rejects a
-//  NULL buffer, and otherwise returns NotImplemented. The buffer is borrowed.
-//  stop clears the flag and may be called again.
+//  not camera injection. injectSampleBuffer:error: rejects a call that is
+//  not prepared, rejects a NULL buffer once prepared, and otherwise CFRetains
+//  the buffer as _latest. Replacing _latest CFReleases the previous buffer
+//  first. stop and dealloc CFRelease _latest. The caller's original retain
+//  is not released here.
+//
+//  Every read, replace, and release of _latest runs under _lock.
 //
 //  LAYERING: do not import MediaReader.h, SampleBufferBuilder.h, or
 //  MyVCamManager.h.
@@ -27,6 +31,7 @@ NSString * const MyVCamVideoInjectorErrorDomain = @"MyVCamVideoInjectorErrorDoma
 @implementation VideoInjector {
     os_unfair_lock _lock;
     BOOL _prepared;
+    CMSampleBufferRef _Nullable _latest;
 }
 
 - (instancetype)init {
@@ -36,7 +41,17 @@ NSString * const MyVCamVideoInjectorErrorDomain = @"MyVCamVideoInjectorErrorDoma
     }
     _lock = OS_UNFAIR_LOCK_INIT;
     _prepared = NO;
+    _latest = NULL;
     return self;
+}
+
+- (void)dealloc {
+    os_unfair_lock_lock(&_lock);
+    if (_latest != NULL) {
+        CFRelease(_latest);
+        _latest = NULL;
+    }
+    os_unfair_lock_unlock(&_lock);
 }
 
 - (BOOL)prepareWithError:(NSError * _Nullable * _Nullable)error {
@@ -52,10 +67,8 @@ NSString * const MyVCamVideoInjectorErrorDomain = @"MyVCamVideoInjectorErrorDoma
 - (BOOL)injectSampleBuffer:(CMSampleBufferRef _Nullable)sampleBuffer
                      error:(NSError * _Nullable * _Nullable)error {
     os_unfair_lock_lock(&_lock);
-    BOOL prepared = _prepared;
-    os_unfair_lock_unlock(&_lock);
-
-    if (!prepared) {
+    if (!_prepared) {
+        os_unfair_lock_unlock(&_lock);
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamVideoInjectorErrorCodeNotPrepared
                               description:@"VideoInjector is not prepared. Call prepareWithError: before injectSampleBuffer:error:."];
@@ -64,6 +77,7 @@ NSString * const MyVCamVideoInjectorErrorDomain = @"MyVCamVideoInjectorErrorDoma
     }
 
     if (sampleBuffer == NULL) {
+        os_unfair_lock_unlock(&_lock);
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamVideoInjectorErrorCodeInvalidSampleBuffer
                               description:@"injectSampleBuffer:error: requires a non-NULL CMSampleBuffer."];
@@ -71,16 +85,28 @@ NSString * const MyVCamVideoInjectorErrorDomain = @"MyVCamVideoInjectorErrorDoma
         return NO;
     }
 
-    // Borrowed pointer. Do not CFRetain or CFRelease. No sink exists yet.
-    if (error != NULL) {
-        *error = [self errorWithCode:MyVCamVideoInjectorErrorCodeNotImplemented
-                          description:@"VideoInjector is armed locally and has no injection sink. The sample buffer was not delivered."];
+    // Own a retain separate from the caller's borrowed buffer. Release the
+    // previous latest before the pointer is replaced so a repeat of the same
+    // buffer cannot drop the new retain.
+    CFRetain(sampleBuffer);
+    if (_latest != NULL) {
+        CFRelease(_latest);
     }
-    return NO;
+    _latest = sampleBuffer;
+    os_unfair_lock_unlock(&_lock);
+
+    if (error != NULL) {
+        *error = nil;
+    }
+    return YES;
 }
 
 - (void)stop {
     os_unfair_lock_lock(&_lock);
+    if (_latest != NULL) {
+        CFRelease(_latest);
+        _latest = NULL;
+    }
     _prepared = NO;
     os_unfair_lock_unlock(&_lock);
 }
