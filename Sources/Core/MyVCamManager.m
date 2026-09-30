@@ -150,12 +150,9 @@ static NSError *MyVCamManagerError(MyVCamManagerErrorCode code, NSString *descri
 
     CVPixelBufferRef pixelBuffer = [source copyNextPixelBuffer];
     if (pixelBuffer == NULL) {
-        NSError *readerError = nil;
-        if ([source isKindOfClass:[MediaReader class]]) {
-            readerError = ((MediaReader *)source).lastError;
-        }
+        // Protocol contract: nil lastError is end of media. Do not downcast.
         if (error != NULL) {
-            *error = readerError;
+            *error = [source lastError];
         }
         os_unfair_lock_unlock(&_stateLock);
         return NULL;

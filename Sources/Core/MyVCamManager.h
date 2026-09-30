@@ -82,6 +82,7 @@ typedef NS_ENUM(NSInteger, MyVCamManagerErrorCode) {
 /// Pulls one CVPixelBuffer and builds one CMSampleBuffer.
 /// Caller owns the result (CF_RETURNS_RETAINED).
 /// NULL and a nil error means the video track has ended.
+/// NULL and a non-nil error is the frame source's -lastError, or a builder error.
 /// Does not call VideoInjector.
 - (CMSampleBufferRef _Nullable)copyNextSampleBufferWithError:(NSError * _Nullable * _Nullable)error
     CF_RETURNS_RETAINED;

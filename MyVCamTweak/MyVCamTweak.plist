@@ -9,9 +9,9 @@
 			<!--
 			  Harmless placeholder. This bundle identifier is not a system
 			  daemon and not an App Store app, so the dylib is not injected
-			  anywhere in Stage 2.1.
-			  Stage 2.2 replaces this filter. Do not point it at mediaserverd,
-			  SpringBoard, or a camera client in this stage.
+			  anywhere yet.
+			  Keep this placeholder until a later device stage. Do not point
+			  it at mediaserverd, SpringBoard, or a camera client here.
 			-->
 			<string>com.myvcam.stage21.placeholder</string>
 		</array>

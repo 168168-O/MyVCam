@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -26,6 +27,7 @@ jobs:
             build-essential \
             ca-certificates \
             curl \
+            dpkg \
             fakeroot \
             git \
             libtinfo5 \
@@ -37,8 +39,21 @@ jobs:
       - name: Install Theos
         run: |
           set -euo pipefail
+          # Pinned to the Theos commit that produced the green ad93430 package.
+          theos_sha="dd5c14bb9d91311e221d51b5bfb8c9e5948156db"
           theos="${RUNNER_TEMP}/theos"
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$theos"
+          mkdir -p "$theos"
+          git -C "$theos" init
+          git -C "$theos" remote add origin https://github.com/theos/theos.git
+          git -C "$theos" fetch --depth 1 origin "$theos_sha"
+          git -C "$theos" checkout --detach FETCH_HEAD
+          git -C "$theos" submodule update --init --recursive
+          head_sha="$(git -C "$theos" rev-parse HEAD)"
+          if [[ "$head_sha" != "$theos_sha" ]]; then
+            echo "Theos HEAD ${head_sha} is not ${theos_sha}" >&2
+            exit 1
+          fi
+          echo "Theos ${head_sha}"
           echo "THEOS=${theos}" >> "$GITHUB_ENV"
 
       - name: Install iOS toolchain
@@ -68,7 +83,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$THEOS/sdks"
           curl -fsSL -o "${RUNNER_TEMP}/iPhoneOS16.5.sdk.tar.xz" \
-            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz"
+            "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
           tar -xJf "${RUNNER_TEMP}/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
           test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
 
@@ -82,6 +97,31 @@ jobs:
             exit 1
           fi
           printf 'built %s\n' "$merged"
+          lipo_bin=""
+          for candidate in lipo llvm-lipo; do
+            if [[ -x "$THEOS/toolchain/linux/iphone/bin/$candidate" ]]; then
+              lipo_bin="$THEOS/toolchain/linux/iphone/bin/$candidate"
+              break
+            fi
+          done
+          if [[ -z "$lipo_bin" ]]; then
+            echo "toolchain has no lipo" >&2
+            exit 1
+          fi
+          archs="$("$lipo_bin" -info "$merged")"
+          printf '%s\n' "$archs"
+          for required in arm64 arm64e; do
+            if [[ ! "$archs" =~ (^|[^[:alnum:]_])${required}([^[:alnum:]_]|$) ]]; then
+              echo "merged dylib is missing ${required}: ${archs}" >&2
+              exit 1
+            fi
+          done
+          for class_name in MyVCamManager MediaReader SampleBufferBuilder VideoInjector MyVCamFrame; do
+            if ! grep -a -q "$class_name" "$merged"; then
+              echo "merged dylib is missing ${class_name}" >&2
+              exit 1
+            fi
+          done
           mkdir -p artifacts
           cp -v "$merged" artifacts/MyVCamTweak.dylib
 
@@ -103,6 +143,46 @@ jobs:
           printf 'packaged %s\n' "${debs[@]}"
           mkdir -p artifacts
           cp -v "${debs[@]}" artifacts/
+          shopt -s nullglob
+          packaged=(artifacts/*.deb)
+          if [[ ${#packaged[@]} -ne 1 ]]; then
+            echo "expected one packaged deb, found ${#packaged[@]}" >&2
+            exit 1
+          fi
+          dpkg-deb -I "${packaged[0]}"
+          dpkg-deb -c "${packaged[0]}"
+          control_text="$(dpkg-deb -I "${packaged[0]}" control)"
+          printf '%s\n' "$control_text"
+          if ! grep -q '^Package: com.myvcam.tweak$' <<<"$control_text"; then
+            echo "deb Package is not com.myvcam.tweak" >&2
+            exit 1
+          fi
+          if ! grep -q '^Architecture: iphoneos-arm64$' <<<"$control_text"; then
+            echo "deb Architecture is not iphoneos-arm64" >&2
+            exit 1
+          fi
+          if ! grep -q '^Version: 0.2.3' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.3" >&2
+            exit 1
+          fi
+          extracted="${RUNNER_TEMP}/myvcam-deb"
+          rm -rf "$extracted"
+          mkdir -p "$extracted"
+          dpkg-deb -x "${packaged[0]}" "$extracted"
+          mapfile -t dylibs < <(find "$extracted" -name 'MyVCamTweak.dylib' -print)
+          mapfile -t plists < <(find "$extracted" -name 'MyVCamTweak.plist' -print)
+          if [[ ${#dylibs[@]} -ne 1 || ${#plists[@]} -ne 1 ]]; then
+            echo "deb layout is missing the tweak dylib or plist" >&2
+            exit 1
+          fi
+          if ! grep -q '<string>com.myvcam.stage21.placeholder</string>' "${plists[0]}"; then
+            echo "packaged filter is not the placeholder bundle" >&2
+            exit 1
+          fi
+          if grep -E '<string>[^<]*(mediaserverd|SpringBoard)[^<]*</string>' "${plists[0]}"; then
+            echo "packaged filter names a real process" >&2
+            exit 1
+          fi
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4

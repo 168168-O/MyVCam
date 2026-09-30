@@ -3,6 +3,7 @@
 obj/
 packages/
 .debs/
+artifacts/
 *.deb
 *.dSYM
 

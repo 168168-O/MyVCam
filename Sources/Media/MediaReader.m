@@ -28,6 +28,7 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
 @interface MediaReader ()
 - (BOOL)prepareLockedWithError:(NSError * _Nullable * _Nullable)error;
 - (CVPixelBufferRef _Nullable)copyNextPixelBufferLocked;
+- (void)recordNonReadingStatusLocked;
 - (void)teardownLocked;
 - (NSError *)errorWithCode:(MyVCamMediaReaderErrorCode)code
                description:(NSString *)description
@@ -178,6 +179,8 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:fileURL options:nil];
     // iPhoneOS 16.5 has no -loadValuesSynchronouslyForKeys:. This is the
     // supported iOS 15+ tracks load; prepare stays synchronous by waiting.
+    // The handler must not need _lock. Do not pump this thread's run loop
+    // while _lock is held: os_unfair_lock is not recursive.
     dispatch_semaphore_t tracksLoaded = dispatch_semaphore_create(0);
     __block NSArray<AVAssetTrack *> *videoTracks = nil;
     __block NSError *tracksError = nil;
@@ -263,27 +266,44 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     return YES;
 }
 
-- (CVPixelBufferRef _Nullable)copyNextPixelBufferLocked {
-    if (!_prepared || _reader == nil || _output == nil) {
-        return NULL;
+- (void)recordNonReadingStatusLocked {
+    AVAssetReaderStatus status = _reader.status;
+    if (status == AVAssetReaderStatusCompleted) {
+        _lastError = nil;
+        return;
     }
-    if (_reader.status != AVAssetReaderStatusReading) {
-        if (_reader.status == AVAssetReaderStatusFailed && _lastError == nil) {
+    if (status == AVAssetReaderStatusFailed) {
+        if (_lastError == nil) {
             _lastError = _reader.error ?: [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
                                                   description:@"AVAssetReader failed while decoding."
                                                    underlying:nil];
         }
+        return;
+    }
+    _lastError = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
+                         description:@"AVAssetReader stopped before the video track ended."
+                          underlying:_reader.error];
+}
+
+- (CVPixelBufferRef _Nullable)copyNextPixelBufferLocked {
+    if (!_prepared || _reader == nil || _output == nil) {
+        // NULL without an error would look like end of media.
+        _lastError = [self errorWithCode:MyVCamMediaReaderErrorCodeNotPrepared
+                             description:@"MediaReader is not prepared."
+                              underlying:nil];
+        return NULL;
+    }
+    if (_reader.status != AVAssetReaderStatusReading) {
+        [self recordNonReadingStatusLocked];
         return NULL;
     }
 
     CMSampleBufferRef sampleBuffer = [_output copyNextSampleBuffer];
     if (sampleBuffer == NULL) {
-        if (_reader.status == AVAssetReaderStatusFailed) {
-            _lastError = _reader.error ?: [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
-                                                  description:@"AVAssetReader failed while decoding."
-                                                   underlying:nil];
-        } else {
+        if (_reader.status == AVAssetReaderStatusReading) {
             _lastError = nil;
+        } else {
+            [self recordNonReadingStatusLocked];
         }
         return NULL;
     }
