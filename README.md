@@ -12,7 +12,7 @@ MyVCamManager
 
 `VideoInjector` is still a stub. Nothing in this stage injects a buffer, installs a hook, or targets a real process.
 
-**未验证.** This tree was not compiled with Theos and was not installed on a device.
+GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and uploads `MyVCam-deb` and `MyVCam-dylib`. That compile does not install the package and does not feed a camera.
 
 ## What Stage 2.2 does
 
@@ -33,7 +33,7 @@ MyVCamManager
 - A preferences UI
 - A real Substrate filter
 
-`MyVCamFrameSource` selectors are unchanged.
+`MyVCamFrameSource` includes `lastError` so end of media (`NULL` and a nil error) is distinct from a failed read. `MyVCamManager` uses that method and does not downcast to `MediaReader`.
 
 ## Layering
 
@@ -72,7 +72,7 @@ if ([manager startWithError:&error]) {
 | `Sources/Media/MediaReader.h` `.m` | Local `AVAssetReader`. `copyNextPixelBuffer` returns a retained `32BGRA` buffer or `NULL`. |
 | `Sources/Buffer/SampleBufferBuilder.h` `.m` | `CMVideoFormatDescriptionCreateForImageBuffer` + `CMSampleBufferCreateForImageBuffer`. |
 | `Sources/Core/MyVCamManager.h` `.m` | Attach, prepare, pull, build. Does not inject. |
-| `Sources/Core/MyVCamFrameSource.h` | Unchanged protocol. |
+| `Sources/Core/MyVCamFrameSource.h` | Protocol. `lastError` distinguishes end of media from failure. |
 | `Sources/Core/MyVCamFrame.h` `.m` | Unchanged thin carrier. Unused by the new chain. |
 | `Sources/Inject/VideoInjector.h` `.m` | Unchanged stubs. |
 | `MyVCamTweak/Tweak.x` | Unchanged `%ctor`. No `%hook`. |
@@ -93,7 +93,7 @@ if ([manager startWithError:&error]) {
 | `-[VideoInjector prepareWithError:]` / `injectSampleBuffer:error:` | Still `NO`, not implemented. |
 | `-[VideoInjector stop]` | Still a no-op. |
 
-End of file is `copyNextSampleBufferWithError:` returning `NULL` with a nil error. A reader failure returns `NULL` with `lastError` attached.
+End of file is `copyNextSampleBufferWithError:` returning `NULL` with a nil error. A reader failure returns `NULL` with the frame source's `lastError` attached. `-[MediaReader copyNextPixelBuffer]` before `prepareWithError:` returns `NULL` with `MyVCamMediaReaderErrorCodeNotPrepared`, which is not end of file.
 
 ## Third-party references
 
@@ -114,11 +114,11 @@ Detail is in [Docs/THIRD_PARTY_MAP.md](Docs/THIRD_PARTY_MAP.md).
 
 ## Build locally
 
-Requires Theos and an iOS SDK new enough for `iphone:clang:latest:15.0`. Both Makefiles export `THEOS_PACKAGE_SCHEME=rootless`. `control` is `Architecture: iphoneos-arm64`, package version `0.2.2`.
+Requires Theos and an iOS SDK new enough for `iphone:clang:latest:15.0`. Both Makefiles export `THEOS_PACKAGE_SCHEME=rootless`. `control` is `Architecture: iphoneos-arm64`, package version `0.2.3`.
 
 ```sh
 export THEOS=$HOME/theos
 make package
 ```
 
-Run that from this directory. Those commands were not run here. There is no package log and no device install.
+The Linux toolchain used by Actions warns that the `arm64e` objects were built with an incompatible arm64e ABI. The link still produces a merged dylib. Confirm that slice on a device before relying on it. There is no device install in this tree.

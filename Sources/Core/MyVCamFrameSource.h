@@ -3,13 +3,14 @@
 //  MyVCam
 //
 //  Protocol only. No concrete reader lives here.
-//  Stage 2.2 did not change these selectors.
 //
 //  Responsibility: the read side of the pipeline. A conforming type vends
 //  CVPixelBuffer frames and the media times that belong to those frames.
 //  It does not build CMSampleBuffer values and it does not inject them.
 //
 //  Legal output of this boundary: CVPixelBuffer (plus timing metadata).
+//  NULL from -copyNextPixelBuffer is end of media only when -lastError is nil.
+//  A non-nil -lastError means that NULL was a failure.
 //  SampleBufferBuilder is the next type, and only MyVCamManager may call it.
 //
 
@@ -37,6 +38,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Duration of the buffer last returned by -copyNextPixelBuffer.
 /// kCMTimeInvalid when no frame has been produced.
 - (CMTime)durationOfLastFrame;
+
+/// Why the latest -copyNextPixelBuffer returned NULL.
+/// Nil means end of media, or that no read has failed yet.
+/// Non-nil means not prepared, a decode failure, or a cancelled reader.
+/// Orchestration must use this instead of downcasting to a concrete reader.
+- (nullable NSError *)lastError;
 
 /// Drop prepared state. Safe to call more than once. Does not inject.
 - (void)reset;

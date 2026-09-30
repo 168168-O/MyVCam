@@ -58,6 +58,7 @@ MyVCamManager
 ```
 
 - `MediaReader` implements `MyVCamFrameSource` and must not depend on `SampleBufferBuilder` or `VideoInjector`.
+- `lastError` on `MyVCamFrameSource` is how the manager tells end of media from a failed read. It does not downcast to `MediaReader`.
 - `SampleBufferBuilder` only converts `CVPixelBuffer` to `CMSampleBuffer`.
 - `VideoInjector` only injects.
 - Do not collapse these types into one class to match a third-party file.

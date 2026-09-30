@@ -2,12 +2,13 @@
 //  Tweak.x
 //  MyVCam
 //
-//  Stage 2.1 constructor only.
+//  Constructor only.
 //  Builds the orchestrator object and returns. No %hook, no %init,
 //  no mediaserverd, no AVFoundation capture replacement.
 //
 //  MyVCamTweak.plist matches only com.myvcam.stage21.placeholder.
-//  Stage 2.2 is responsible for a real filter.
+//  A real filter is a later device stage. Do not point it at a camera
+//  process from this file.
 //
 
 #import <Foundation/Foundation.h>

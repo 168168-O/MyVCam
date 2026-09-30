@@ -32,6 +32,8 @@ typedef NS_ENUM(NSInteger, MyVCamMediaReaderErrorCode) {
     MyVCamMediaReaderErrorCodeNoVideoTrack = 3,
     /// AVAsset or AVAssetReader could not load or start, or a sample had no image.
     MyVCamMediaReaderErrorCodeReaderFailed = 4,
+    /// -copyNextPixelBuffer was called before a successful -prepareWithError:.
+    MyVCamMediaReaderErrorCodeNotPrepared = 5,
 };
 
 @interface MediaReader : NSObject <MyVCamFrameSource>
@@ -45,6 +47,8 @@ typedef NS_ENUM(NSInteger, MyVCamMediaReaderErrorCode) {
 
 /// Failure from the latest prepare or copy. Nil after a successful prepare,
 /// and nil when -copyNextPixelBuffer returns NULL because the track ended.
+/// NotPrepared when copy is called before a successful prepare. That NULL is
+/// not end of media.
 @property (nonatomic, strong, readonly, nullable) NSError *lastError;
 
 @end
