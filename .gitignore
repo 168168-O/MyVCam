@@ -1,0 +1,12 @@
+# Theos build products
+.theos/
+obj/
+packages/
+.debs/
+*.deb
+*.dSYM
+
+# Editor / OS
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,119 @@
+# Compile and package the Stage 2.2 rootless tweak.
+# Does not install, inject, or run device/camera tests.
+name: Compile MyVCam
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Theos rootless compile and package
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            fakeroot \
+            git \
+            libtinfo5 \
+            libtinfo6 \
+            perl \
+            rsync \
+            xz-utils
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+          theos="${RUNNER_TEMP}/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$theos"
+          echo "THEOS=${theos}" >> "$GITHUB_ENV"
+
+      - name: Install iOS toolchain
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) asset="iOSToolchain-x86_64.tar.xz" ;;
+            aarch64|arm64) asset="iOSToolchain-aarch64.tar.xz" ;;
+            *)
+              echo "unsupported runner arch: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o "${RUNNER_TEMP}/toolchain.tar.xz" \
+            "https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/${asset}"
+          tar -xJf "${RUNNER_TEMP}/toolchain.tar.xz" -C "$THEOS/toolchain"
+          clang="$THEOS/toolchain/linux/iphone/bin/clang"
+          if [[ ! -x "$clang" ]]; then
+            echo "iOS clang was not installed at $clang" >&2
+            find "$THEOS/toolchain" -maxdepth 4 -type d >&2
+            exit 1
+          fi
+          "$clang" --version
+
+      - name: Install iPhoneOS 16.5 SDK
+        run: |
+          set -euo pipefail
+          mkdir -p "$THEOS/sdks"
+          curl -fsSL -o "${RUNNER_TEMP}/iPhoneOS16.5.sdk.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz"
+          tar -xJf "${RUNNER_TEMP}/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
+
+      - name: Compile rootless tweak
+        run: |
+          set -euo pipefail
+          make
+          mapfile -t libs < <(find . -path './.git' -prune -o -name 'MyVCamTweak.dylib' -print)
+          if [[ ${#libs[@]} -eq 0 ]]; then
+            echo "make finished without MyVCamTweak.dylib" >&2
+            exit 1
+          fi
+          printf 'built %s\n' "${libs[@]}"
+          mkdir -p artifacts
+          cp -v "${libs[@]}" artifacts/
+
+      - name: Package rootless .deb
+        run: |
+          set -euo pipefail
+          make package
+          mapfile -t debs < <(
+            find . \
+              -path './.git' -prune -o \
+              -path './artifacts' -prune -o \
+              -name '*.deb' -print
+          )
+          if [[ ${#debs[@]} -eq 0 ]]; then
+            echo "make package finished without .deb" >&2
+            find . -path './.git' -prune -o -type f -print | head -200 >&2
+            exit 1
+          fi
+          printf 'packaged %s\n' "${debs[@]}"
+          mkdir -p artifacts
+          cp -v "${debs[@]}" artifacts/
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyVCam-deb
+          path: artifacts/*.deb
+          if-no-files-found: error
+
+      - name: Upload .dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyVCam-dylib
+          path: artifacts/*.dylib
+          if-no-files-found: error

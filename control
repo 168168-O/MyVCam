@@ -1,0 +1,9 @@
+Package: com.myvcam.tweak
+Name: MyVCam
+Version: 0.2.2
+Architecture: iphoneos-arm64
+Description: Stage 2.2 local-file reader and sample-buffer builder. Video injection is not implemented.
+Maintainer: MyVCam Project
+Author: MyVCam Project
+Section: Tweaks
+Depends: mobilesubstrate

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Filter</key>
+	<dict>
+		<key>Bundles</key>
+		<array>
+			<!--
+			  Harmless placeholder. This bundle identifier is not a system
+			  daemon and not an App Store app, so the dylib is not injected
+			  anywhere in Stage 2.1.
+			  Stage 2.2 replaces this filter. Do not point it at mediaserverd,
+			  SpringBoard, or a camera client in this stage.
+			-->
+			<string>com.myvcam.stage21.placeholder</string>
+		</array>
+	</dict>
+</dict>
+</plist>
