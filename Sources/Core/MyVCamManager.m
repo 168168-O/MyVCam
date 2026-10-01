@@ -499,7 +499,7 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _feedQueue);
     if (timer == NULL) {
         NSLog(@"%s feed stopped: could not create timer", kMyVCamC1CPrefix);
-        NSLog(@"[MyVCam 0.2.11] feed timer started yes=0");
+        NSLog(@"[MyVCam 0.2.12] feed timer started yes=0");
         [self stopFeedIfGeneration:generation];
         return;
     }
@@ -523,14 +523,14 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
         // A suspended source is not released until it is resumed.
         dispatch_resume(timer);
         dispatch_source_cancel(timer);
-        NSLog(@"[MyVCam 0.2.11] feed timer started yes=0");
+        NSLog(@"[MyVCam 0.2.12] feed timer started yes=0");
         return;
     }
     _feedTimer = timer;
     os_unfair_lock_unlock(&_stateLock);
     dispatch_resume(timer);
     NSLog(@"%s feed timer started at %d fps", kMyVCamC1CPrefix, kMyVCamFeedFramesPerSecond);
-    NSLog(@"[MyVCam 0.2.11] feed timer started yes=1");
+    NSLog(@"[MyVCam 0.2.12] feed timer started yes=1");
 }
 
 // Runs on com.myvcam.feed. Does not run on the capture delegate queue.
@@ -555,14 +555,14 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
         injected += 1;
         if (!loggedTick) {
             loggedTick = YES;
-            NSLog(@"[MyVCam 0.2.11] timer ticks feed=1");
+            NSLog(@"[MyVCam 0.2.12] timer ticks feed=1");
         }
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         if (windowStart == 0) {
             windowStart = now;
         }
         if (now - windowStart >= 1.0) {
-            NSLog(@"[MyVCam 0.2.11] injected frames/sec=%u", injected);
+            NSLog(@"[MyVCam 0.2.12] injected frames/sec=%u", injected);
             injected = 0;
             windowStart = now;
         }
