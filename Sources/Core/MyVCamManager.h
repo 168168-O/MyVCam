@@ -17,8 +17,8 @@
 //    then CFReleases it.
 //    The C1-C feed calls injectNext on com.myvcam.feed. The capture delegate
 //    queue is not that queue. Tweak.x attaches, starts, and stops. It does
-//    that after 30 passthrough callbacks, on com.myvcam.enable, not inside
-//    AVCaptureSession startRunning.
+//    that on com.myvcam.enable after startRunning returns, not inside
+//    startRunning and not after a delegate-callback count.
 //
 //  LAYERING
 //  - The concrete reader (MediaReader) implements MyVCamFrameSource.

@@ -66,10 +66,23 @@ static CMTime MyVCamInjectorDuration(CMSampleBufferRef sampleBuffer) {
     return MyVCamInjectorDurationOrFallback(CMSampleBufferGetDuration(sampleBuffer));
 }
 
-static void MyVCamInjectorLogMatchFailureOnce(void) {
+static void MyVCamInjectorLogMatchFailureOnce(OSType format, size_t width, size_t height, const char *reason) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSLog(@"%s replacement skipped: origin video format was not matched", kMyVCamC1BPrefix);
+        unsigned char c0 = (unsigned char)((format >> 24) & 0xff);
+        unsigned char c1 = (unsigned char)((format >> 16) & 0xff);
+        unsigned char c2 = (unsigned char)((format >> 8) & 0xff);
+        unsigned char c3 = (unsigned char)(format & 0xff);
+        if (c0 < 32 || c0 > 126) c0 = '?';
+        if (c1 < 32 || c1 > 126) c1 = '?';
+        if (c2 < 32 || c2 > 126) c2 = '?';
+        if (c3 < 32 || c3 > 126) c3 = '?';
+        NSLog(@"%s replacement skipped: %s format=%c%c%c%c %zux%zu",
+              kMyVCamC1BPrefix,
+              reason != NULL ? reason : "origin video format was not matched",
+              c0, c1, c2, c3,
+              width,
+              height);
     });
 }
 
@@ -483,6 +496,16 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
     os_unfair_lock_unlock(&_lock);
 }
 
+- (CMSampleBufferRef _Nullable)copyLatestSampleBuffer {
+    os_unfair_lock_lock(&_lock);
+    CMSampleBufferRef latest = _latest;
+    if (latest != NULL) {
+        CFRetain(latest);
+    }
+    os_unfair_lock_unlock(&_lock);
+    return latest;
+}
+
 - (CMSampleBufferRef _Nullable)copyLatestSampleBufferMatchingOrigin:(CMSampleBufferRef)origin {
     if (origin == NULL || !CMSampleBufferIsValid(origin)) {
         return NULL;
@@ -516,21 +539,27 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
     }
     CFRelease(latest);
     if (sourcePixels == NULL) {
-        MyVCamInjectorLogMatchFailureOnce();
+        MyVCamInjectorLogMatchFailureOnce(0, 0, 0, "latest sample has no image buffer");
         return NULL;
     }
 
     CVPixelBufferRef matched = MyVCamInjectorCopyPixelsMatchingOrigin(sourcePixels, originPixels);
     CVPixelBufferRelease(sourcePixels);
     if (matched == NULL) {
-        MyVCamInjectorLogMatchFailureOnce();
+        MyVCamInjectorLogMatchFailureOnce(CVPixelBufferGetPixelFormatType(originPixels),
+                                          CVPixelBufferGetWidth(originPixels),
+                                          CVPixelBufferGetHeight(originPixels),
+                                          "origin video format was not matched");
         return NULL;
     }
 
     CMSampleBufferRef replacement = MyVCamInjectorCreateSample(matched, presentationTime, duration);
     CVPixelBufferRelease(matched);
     if (replacement == NULL) {
-        MyVCamInjectorLogMatchFailureOnce();
+        MyVCamInjectorLogMatchFailureOnce(CVPixelBufferGetPixelFormatType(originPixels),
+                                          CVPixelBufferGetWidth(originPixels),
+                                          CVPixelBufferGetHeight(originPixels),
+                                          "could not build a sample buffer for the matched pixels");
         return NULL;
     }
     MyVCamInjectorCopySafeAttachments(origin, replacement);

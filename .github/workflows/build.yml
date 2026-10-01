@@ -158,6 +158,14 @@ jobs:
             echo "merged dylib is missing the passthrough warmup log" >&2
             exit 1
           fi
+          if ! grep -a -F 'preview showing imported video' "$merged"; then
+            echo "merged dylib is missing the preview-layer log" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'copyLatestSampleBuffer' "$merged"; then
+            echo "merged dylib is missing copyLatestSampleBuffer" >&2
+            exit 1
+          fi
           if ! grep -a -F '/var/mobile/Documents/MyVCam/disable' "$merged"; then
             echo "merged dylib is missing the disable-file path" >&2
             exit 1
@@ -201,8 +209,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.5' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.5" >&2
+          if ! grep -q '^Version: 0.2.6' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.6" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"

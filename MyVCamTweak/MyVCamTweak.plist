@@ -9,8 +9,10 @@
 			<!--
 			  C1-A/B/C run inside Camera only. One bundle.
 			  Exact bundle id. Does not match mediaserverd or SpringBoard.
-			  C1-C arms the manager feed after 30 passthrough callbacks,
-			  unless /var/mobile/Documents/MyVCam/disable exists.
+			  C1-C arms the manager feed after startRunning returns,
+			  unless /var/mobile/Documents/MyVCam/disable exists
+			  or test.mp4 is not readable. The viewfinder overlay
+			  reads VideoInjector while that feed is running.
 			-->
 			<string>com.apple.camera</string>
 		</array>
