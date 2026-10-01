@@ -182,8 +182,20 @@ jobs:
             echo "merged dylib is missing the preview overlay log" >&2
             exit 1
           fi
-          if ! grep -a -F '[MyVCam 0.2.11]' "$merged"; then
-            echo "merged dylib is missing the 0.2.11 diagnostic prefix" >&2
+          if ! grep -a -F '[MyVCam 0.2.12]' "$merged"; then
+            echo "merged dylib is missing the 0.2.12 diagnostic prefix" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'preview connection blocked' "$merged"; then
+            echo "merged dylib is missing the preview connection blocked log" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'preview detached' "$merged"; then
+            echo "merged dylib is missing the preview detached log" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'slot=' "$merged"; then
+            echo "merged dylib is missing the placement slot log" >&2
             exit 1
           fi
           if ! grep -a -F 'host found' "$merged"; then
@@ -241,8 +253,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.11' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.11" >&2
+          if ! grep -q '^Version: 0.2.12' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.12" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"

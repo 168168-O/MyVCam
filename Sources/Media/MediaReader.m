@@ -35,7 +35,7 @@
 #import <sys/stat.h>
 #import <unistd.h>
 
-static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.11]";
+static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.12]";
 
 static const char *MyVCamReaderStatusName(BOOL created, AVAssetReaderStatus status) {
     if (!created) {
@@ -466,9 +466,12 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
 
     // IOSurface-backed buffers can be wrapped into a sample Camera will accept.
     // A CPU-only buffer is a common first-frame crash once it is substituted.
+    // CoreAnimation compatibility is what AVSampleBufferDisplayLayer accepts.
+    // A bare IOSurface can enqueue and still not composite over the preview.
     NSDictionary *settings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
         (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (id)kCVPixelBufferIOSurfaceCoreAnimationCompatibilityKey: @YES,
         (id)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
     AVAssetReaderTrackOutput *output =

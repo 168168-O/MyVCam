@@ -416,7 +416,7 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
 static void MyVCamLogInjectorSample(BOOL received) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSLog(@"[MyVCam 0.2.11] VideoInjector CMSampleBuffer yes=%d", received ? 1 : 0);
+        NSLog(@"[MyVCam 0.2.12] VideoInjector CMSampleBuffer yes=%d", received ? 1 : 0);
     });
 }
 
