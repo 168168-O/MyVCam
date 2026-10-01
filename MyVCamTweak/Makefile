@@ -1,9 +1,9 @@
 #
-# MyVCamTweak — Stage 2.2 single tweak target.
+# MyVCamTweak — single tweak target.
 #
-# Compiles the local-file reader and sample-buffer builder into one dylib.
-# VideoInjector remains a stub. INSTALL_TARGET_PROCESSES is empty on purpose.
-# The filter plist still matches a placeholder bundle only.
+# Compiles the local-file reader, sample-buffer builder, injector, and the
+# C1-C manager feed into one dylib. INSTALL_TARGET_PROCESSES is empty on
+# purpose. The filter plist matches com.apple.camera only.
 #
 
 ARCHS := arm64 arm64e

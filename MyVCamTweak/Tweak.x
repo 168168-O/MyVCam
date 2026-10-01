@@ -11,8 +11,12 @@
 //  IMP is called with that replacement and the replacement is CFReleased.
 //  When it returns NULL, the original IMP is called with the original
 //  sampleBuffer. The original sampleBuffer is never mutated.
-//  This file does not start a capture session, does not arm a timer, and
-//  does not call inject or injectNext.
+//  The delegate hook does not call inject or injectNext and does not arm
+//  a timer. That work stays on MyVCamManager's feed queue.
+//
+//  C1-C: AVCaptureSession startRunning attaches the fixed test video and
+//  calls startWithError:. stopRunning calls stop. The manager owns the
+//  30 fps loop. This file does not decode and does not touch mediaserverd.
 //
 //  MyVCamTweak.plist matches com.apple.camera only.
 //
@@ -43,6 +47,7 @@ static NSMutableSet *gMissingClasses;
 static os_unfair_lock gLock = OS_UNFAIR_LOCK_INIT;
 static const char kMyVCamC1APrefix[] = "[MyVCam C1-A]";
 static const char kMyVCamC1BPrefix[] = "[MyVCam C1-B]";
+static const char kMyVCamC1CPrefix[] = "[MyVCam C1-C]";
 static BOOL gC1BLoggedPassThrough = NO;
 static BOOL gC1BLoggedReplace = NO;
 
@@ -222,10 +227,49 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
     NSLog(@"%s hooked captureOutput:didOutputSampleBuffer:fromConnection: on %@", kMyVCamC1APrefix, NSStringFromClass(implClass));
 }
 
+static void MyVCamC1C_SessionDidStart(void) {
+    // Attach and start on the thread that called startRunning. Frame pulls
+    // happen later, on the manager's feed queue, not on this thread and not
+    // on the sample-buffer delegate queue. A missing file returns NO.
+    MyVCamManager *manager = [MyVCamManager sharedManager];
+    NSString *path = [NSString stringWithUTF8String:MyVCamManagerTestVideoPathUTF8];
+    if (path.length == 0) {
+        NSLog(@"%s feed not started: test video path is empty", kMyVCamC1CPrefix);
+        return;
+    }
+    NSURL *fileURL = [NSURL fileURLWithPath:path isDirectory:NO];
+    [manager attachMediaFileURL:fileURL];
+    NSError *error = nil;
+    if (![manager startWithError:&error]) {
+        NSLog(@"%s feed not started path=%s error=%@", kMyVCamC1CPrefix, MyVCamManagerTestVideoPathUTF8, error);
+        return;
+    }
+    NSLog(@"%s feed started path=%s", kMyVCamC1CPrefix, MyVCamManagerTestVideoPathUTF8);
+}
+
+static void MyVCamC1C_SessionDidStop(void) {
+    [[MyVCamManager sharedManager] stop];
+    NSLog(@"%s capture session stopped the feed", kMyVCamC1CPrefix);
+}
+
 %hook AVCaptureVideoDataOutput
 
 - (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
     MyVCamC1A_HookDelegateIfNeeded(sampleBufferDelegate);
+    %orig;
+}
+
+%end
+
+%hook AVCaptureSession
+
+- (void)startRunning {
+    MyVCamC1C_SessionDidStart();
+    %orig;
+}
+
+- (void)stopRunning {
+    MyVCamC1C_SessionDidStop();
     %orig;
 }
 

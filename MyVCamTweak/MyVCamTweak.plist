@@ -7,8 +7,8 @@
 		<key>Bundles</key>
 		<array>
 			<!--
-			  C1-A verifies the capture delegate hook inside Camera only.
-			  One bundle. The hook passes the original sample buffer through.
+			  C1-A/B/C run inside Camera only. One bundle.
+			  C1-C starts the manager feed from AVCaptureSession.
 			-->
 			<string>com.apple.camera</string>
 		</array>
