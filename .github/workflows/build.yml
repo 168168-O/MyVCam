@@ -126,6 +126,14 @@ jobs:
             echo "merged dylib is missing the C1-A log prefix" >&2
             exit 1
           fi
+          if ! grep -a -F '[MyVCam C1-B]' "$merged"; then
+            echo "merged dylib is missing the C1-B log prefix" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'copyLatestSampleBufferMatchingOrigin:' "$merged"; then
+            echo "merged dylib is missing copyLatestSampleBufferMatchingOrigin:" >&2
+            exit 1
+          fi
           mkdir -p artifacts
           cp -v "$merged" artifacts/MyVCamTweak.dylib
 

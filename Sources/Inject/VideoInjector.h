@@ -2,7 +2,7 @@
 //  VideoInjector.h
 //  MyVCam
 //
-//  Latest-buffer sink. There are still no hooks.
+//  Latest-buffer sink. There are still no hooks in this class.
 //
 //  Responsibility: remember whether the injector has been armed, and keep
 //  one retained CMSampleBuffer — the latest one accepted. prepareWithError:
@@ -11,13 +11,20 @@
 //  buffer once armed and stores it as _latest. stop CFReleases that buffer
 //  and clears the flag. dealloc CFReleases it if stop did not.
 //
+//  copyLatestSampleBufferMatchingOrigin: reads that stored buffer. It
+//  returns a new caller-owned image sample buffer whose pixels come from
+//  _latest and whose presentation time and duration come from the origin
+//  buffer. It does not mutate either buffer. NULL means the caller should
+//  keep the origin buffer.
+//
 //  The caller borrows the pointer it passes in. The injector owns only the
-//  reference it CFRetains. This phase does not install hooks, swizzle
+//  reference it CFRetains. This class does not install hooks, swizzle
 //  capture classes, or talk to mediaserverd.
 //
 //  LAYERING: do not import MediaReader, MyVCamFrameSource, MyVCamManager,
 //  or SampleBufferBuilder. The injector does not decode video and does not
-//  convert CVPixelBuffer values.
+//  convert pixel formats. The read path duplicates the small CoreMedia
+//  create sequence instead of calling SampleBufferBuilder.
 //
 //  Later reference (not ported in this phase): DiCoy AVFoundation hooks.
 //  EthanArbuckle mediaserverd / BWNodeOutput injection is explicitly deferred
@@ -60,6 +67,23 @@ typedef NS_ENUM(NSInteger, MyVCamVideoInjectorErrorCode) {
 /// Under the injector lock, CFReleases _latest when it is set, clears it, and
 /// clears the armed flag. Safe to call more than once.
 - (void)stop;
+
+/// Caller owns the result (CF_RETURNS_RETAINED) and must CFRelease it.
+/// NULL when origin is NULL, when no latest buffer is stored, when that
+/// buffer has no image buffer, when the origin presentation time is not
+/// numeric, or when a new sample buffer cannot be built.
+/// Does not mutate origin or the stored latest buffer, and does not change
+/// prepare / inject / stop.
+///
+/// The result is a new image sample buffer. Its pixel buffer is the one
+/// already inside the latest sample. Its presentation time and duration are
+/// copied from origin (output time, then presentation time; output duration,
+/// then duration). A non-positive or non-numeric duration becomes 1/30 second.
+/// decodeTimeStamp is kCMTimeInvalid. Attachments are not copied and the
+/// pixel format is not converted.
+/// The injector lock is taken only to CFRetain the stored buffer.
+- (CMSampleBufferRef _Nullable)copyLatestSampleBufferMatchingOrigin:(CMSampleBufferRef)origin
+    CF_RETURNS_RETAINED;
 
 @end
 
