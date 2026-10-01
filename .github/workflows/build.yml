@@ -182,8 +182,24 @@ jobs:
             echo "merged dylib is missing the preview overlay log" >&2
             exit 1
           fi
-          if ! grep -a -F '[MyVCam 0.2.10]' "$merged"; then
-            echo "merged dylib is missing the 0.2.10 diagnostic prefix" >&2
+          if ! grep -a -F '[MyVCam 0.2.11]' "$merged"; then
+            echo "merged dylib is missing the 0.2.11 diagnostic prefix" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'host found' "$merged"; then
+            echo "merged dylib is missing the host found log" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'cover attach' "$merged"; then
+            echo "merged dylib is missing the cover attach log" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'first frame to cover' "$merged"; then
+            echo "merged dylib is missing the first frame to cover log" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'timer ticks' "$merged"; then
+            echo "merged dylib is missing the timer ticks log" >&2
             exit 1
           fi
           mkdir -p artifacts
@@ -225,8 +241,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.10' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.10" >&2
+          if ! grep -q '^Version: 0.2.11' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.11" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"
