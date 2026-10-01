@@ -16,7 +16,9 @@
 //    -injectNextSampleBufferWithError: borrows that buffer to VideoInjector,
 //    then CFReleases it.
 //    The C1-C feed calls injectNext on com.myvcam.feed. The capture delegate
-//    queue is not that queue. Tweak.x only attaches, starts, and stops.
+//    queue is not that queue. Tweak.x attaches, starts, and stops. It does
+//    that after 30 passthrough callbacks, on com.myvcam.enable, not inside
+//    AVCaptureSession startRunning.
 //
 //  LAYERING
 //  - The concrete reader (MediaReader) implements MyVCamFrameSource.

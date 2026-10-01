@@ -371,15 +371,33 @@ static CMSampleBufferRef _Nullable MyVCamInjectorCreateSample(CVPixelBufferRef p
 
     // Capture clients read sample attachments without a NULL check. Creating
     // the array here, and marking the frame display-immediately, matches what
-    // a live video data output buffer has.
+    // a live video data output buffer has. The element is documented as a
+    // mutable dictionary; a different type is left alone.
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true);
     if (attachments != NULL && CFArrayGetCount(attachments) > 0) {
-        CFMutableDictionaryRef dictionary = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
-        if (dictionary != NULL) {
+        CFTypeRef value = CFArrayGetValueAtIndex(attachments, 0);
+        if (value != NULL && CFGetTypeID(value) == CFDictionaryGetTypeID()) {
+            CFMutableDictionaryRef dictionary = (CFMutableDictionaryRef)value;
             CFDictionarySetValue(dictionary, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
         }
     }
     return sampleBuffer;
+}
+
+/// Copies the camera intrinsic matrix when it is a CFData. Other origin
+/// attachments are not aliased: some values are not owned copies and would
+/// dangle after the camera buffer is released.
+static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSampleBufferRef destination) {
+    if (origin == NULL || destination == NULL) {
+        return;
+    }
+    CFTypeRef matrix = CMGetAttachment(origin, kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix, NULL);
+    if (matrix != NULL && CFGetTypeID(matrix) == CFDataGetTypeID()) {
+        CMSetAttachment(destination,
+                        kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix,
+                        matrix,
+                        kCMAttachmentMode_ShouldPropagate);
+    }
 }
 
 @implementation VideoInjector {
@@ -513,7 +531,9 @@ static CMSampleBufferRef _Nullable MyVCamInjectorCreateSample(CVPixelBufferRef p
     CVPixelBufferRelease(matched);
     if (replacement == NULL) {
         MyVCamInjectorLogMatchFailureOnce();
+        return NULL;
     }
+    MyVCamInjectorCopySafeAttachments(origin, replacement);
     return replacement;
 }
 

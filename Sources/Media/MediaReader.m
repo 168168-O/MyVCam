@@ -15,6 +15,9 @@
 //  queue block returns. The slow track load is not on that queue and does not
 //  hold a lock. On the main thread the synchronous tracks API is used so a
 //  completion handler cannot deadlock the thread that is waiting for it.
+//  Off the main thread the load is started on a concurrent queue and the
+//  caller waits on a semaphore, so a serial caller (com.myvcam.feed, during
+//  loop) cannot block the queue the completion needs.
 //
 //  LAYERING: this file must not import SampleBufferBuilder.h or VideoInjector.h.
 //
@@ -139,12 +142,25 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
     AVAssetReaderTrackOutput *output = nil;
     CMTime nominal = CMTimeMake(1, 30);
     NSError *localError = nil;
-    BOOL opened = [self buildReaderForFileURL:self.fileURL
+    BOOL opened = NO;
+    @try {
+        opened = [self buildReaderForFileURL:self.fileURL
                                        asset:&asset
                                       reader:&reader
                                       output:&output
                              nominalDuration:&nominal
                                        error:&localError];
+    } @catch (NSException *exception) {
+        opened = NO;
+        if (reader != nil) {
+            [reader cancelReading];
+            reader = nil;
+        }
+        localError = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
+                             description:@"AVFoundation raised while opening the media file."
+                              underlying:nil];
+        NSLog(@"[MyVCam C1-C] reader exception %@", exception);
+    }
 
     __block BOOL published = NO;
     [self performOnReaderQueue:^{
@@ -274,16 +290,21 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
         return YES;
     }
 
+    // Start the load on a concurrent queue, then wait here. Waiting on
+    // com.myvcam.feed during a loop must not block the queue the completion
+    // needs. dispatch_async does not run the block on this thread.
     dispatch_semaphore_t tracksLoaded = dispatch_semaphore_create(0);
     __block NSArray<AVAssetTrack *> *videoTracks = nil;
     __block NSError *tracksError = nil;
-    [asset loadTracksWithMediaType:AVMediaTypeVideo
-                 completionHandler:^(NSArray<AVAssetTrack *> *_Nullable tracks,
-                                     NSError *_Nullable loadError) {
-        videoTracks = tracks;
-        tracksError = loadError;
-        dispatch_semaphore_signal(tracksLoaded);
-    }];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [asset loadTracksWithMediaType:AVMediaTypeVideo
+                     completionHandler:^(NSArray<AVAssetTrack *> *_Nullable tracks,
+                                         NSError *_Nullable loadError) {
+            videoTracks = tracks;
+            tracksError = loadError;
+            dispatch_semaphore_signal(tracksLoaded);
+        }];
+    });
     dispatch_semaphore_wait(tracksLoaded, DISPATCH_TIME_FOREVER);
     if (tracksError != nil) {
         if (error != NULL) {

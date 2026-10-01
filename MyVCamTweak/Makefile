@@ -6,7 +6,12 @@
 # purpose. The filter plist matches com.apple.camera only.
 #
 
-ARCHS := arm64 arm64e
+# arm64 only. iPhone 12 is arm64e, and the Linux Theos clang emits an arm64e
+# slice with an incompatible pointer-auth ABI (ld warns at link). dyld prefers
+# that slice and Camera dies on the first authenticated call, before any feed
+# runs. ElleKit on Dopamine loads an arm64 tweak into an arm64e process.
+# Do not add arm64e back while Actions uses this toolchain.
+ARCHS := arm64
 TARGET := iphone:clang:latest:15.0
 
 export THEOS_PACKAGE_SCHEME = rootless

@@ -18,7 +18,7 @@ MyVCamManager
 
 `Tweak.x` hooks `-[AVCaptureVideoDataOutput setSampleBufferDelegate:queue:]`. When a delegate is set, it installs a one-time hook on the class that implements `-captureOutput:didOutputSampleBuffer:fromConnection:`. That hook logs once per delegate class. C1-B, below, decides which sample buffer the original implementation receives.
 
-`MyVCamTweak.plist` matches `com.apple.camera` only. This stage does not install the package and does not claim a device result. On a device, the hook fired when the log contains:
+`MyVCamTweak.plist` matches `com.apple.camera` only. `%init` runs on the next turn of the main queue, after the constructor returns. `setSampleBufferDelegate:queue:` calls the original implementation before the delegate class is hooked. This stage does not install the package and does not claim a device result. On a device, the hook fired when the log contains:
 
 ```
 [MyVCam C1-A] captureOutput:didOutputSampleBuffer:fromConnection: fired class=<DelegateClass>
@@ -28,13 +28,14 @@ The install log is `[MyVCam C1-A] hooked captureOutput:didOutputSampleBuffer:fro
 
 ## C1-B — read the latest frame into that hook
 
-The same delegate hook calls `-[VideoInjector copyLatestSampleBufferMatchingOrigin:]` on `[MyVCamManager sharedManager].videoInjector`.
+`com.myvcam.match` calls `-[VideoInjector copyLatestSampleBufferMatchingOrigin:]` on `[MyVCamManager sharedManager].videoInjector`. The capture callback does not call it.
 
-- A non-NULL result is a caller-owned sample buffer. The hook passes that pointer to the original IMP, then `CFRelease`s it.
-- NULL means the hook passes the original `sampleBuffer` through, unchanged.
-- The original `sampleBuffer` is never written.
+- Until a buffer has been published, the callback passes the original `sampleBuffer` through and does not message the injector.
+- A published buffer is restamped with the current sample's timing and passed to the original IMP for a video image only. Audio stays on the camera sample.
+- NULL from the copy means the hook keeps passing the original `sampleBuffer` through.
+- The original `sampleBuffer` is never written and never released.
 
-The new buffer keeps the origin sample's presentation time and duration, and its pixels are the latest frame scaled into an IOSurface buffer of the origin's width, height, and pixel format (`32BGRA`, `420f`, or `420v`). A non-video origin (including audio, which shares this selector), a missing or non-numeric origin presentation time, a latest buffer with no image buffer, an unsupported origin format, or a CoreMedia create failure returns NULL (pass-through). Duration falls back to 1/30 second when the origin duration is not a positive numeric time. The sample-attachment array is created and marked display-immediately. The camera-owned buffer is never released. The hook keeps the last two replacements so Camera can use a pointer after the callback returns.
+The new buffer keeps the origin sample's presentation time and duration, and its pixels are the latest frame scaled into an IOSurface buffer of the origin's width, height, and pixel format (`32BGRA`, `420f`, or `420v`). A non-video origin (including audio, which shares this selector), a missing or non-numeric origin presentation time, a latest buffer with no image buffer, an unsupported origin format, or a CoreMedia create failure returns NULL (pass-through). Duration falls back to 1/30 second when the origin duration is not a positive numeric time. The sample-attachment array is created and marked display-immediately. The camera intrinsic matrix is copied when it is a `CFData`. Other origin attachments are not aliased. The camera-owned buffer is never released. The hook keeps the last eight replacements so Camera can use a pointer after the callback returns.
 
 Each path logs once per process:
 
@@ -57,8 +58,9 @@ The test video is a fixed path. There is no preferences UI and the file is not i
 
 That string is `MyVCamManagerTestVideoPathUTF8`. `Tweak.x` hooks `-[AVCaptureSession startRunning]` and `-[AVCaptureSession stopRunning]`.
 
-- `startRunning` only records that a capture session is up, then calls the original implementation. It does not open the file and does not arm the timer. The first video `captureOutput:didOutputSampleBuffer:fromConnection:` schedules attach and `-[MyVCamManager startWithError:]` on a background queue, after a hop through the main queue, so prepare does not run inside `startRunning` or on the sample-buffer queue. A missing file, a directory, or any other prepare failure returns `NO` with `PrepareFailed`. The timer is not armed and the process does not crash. The log is `[MyVCam C1-C] feed not started path=...`. The schedule log is `[MyVCam C1-C] feed deferred until after the first video sample`.
-- `stopRunning` calls `-[MyVCamManager stop]` before the original implementation, which cancels the timer. The log is `[MyVCam C1-C] capture session stopped the feed`.
+- `startRunning` calls the original implementation, then records that a capture session is up. It does not open the file and does not arm the timer. The first 30 `captureOutput:didOutputSampleBuffer:fromConnection:` calls are passthrough and do not inspect the sample. After those 30 callbacks, `com.myvcam.enable` attaches and calls `-[MyVCamManager startWithError:]`. That queue is not the sample-buffer queue and not `startRunning`. A missing file, a directory, or any other prepare failure returns `NO` with `PrepareFailed`. The timer is not armed and the process does not crash. The log is `[MyVCam C1-C] feed not started path=...`. The warmup log is `[MyVCam C1-C] passthrough warmup finished (30 callbacks)`.
+- Creating `/var/mobile/Documents/MyVCam/disable` skips the feed and the replacement. The delegate hook stays installed and keeps passing the camera sample through. Delete that file and reopen Camera to re-enable. The log is `[MyVCam C1-C] feed not started: disable file ...`.
+- `stopRunning` records the stop, calls the original implementation, and stops the manager on `com.myvcam.enable`. It does not call `MediaReader` on the session thread. The log is `[MyVCam C1-C] capture session stopped the feed`.
 
 `startWithError:` prepares the reader, prepares the injector, then resumes a `DISPATCH_SOURCE_TYPE_TIMER` on the serial queue `com.myvcam.feed`. The rate is a fixed 30 fps (`NSEC_PER_SEC / 30`, leeway 1 ms). It does not read the file's nominal frame rate. The first fire is immediate. Each tick calls `injectNextSampleBufferWithError:` on that queue. The capture delegate hook only reads `_latest`. It does not decode and it does not call inject.
 
@@ -81,7 +83,7 @@ GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and
 
 ## What it does not do
 
-- Decode or call `injectNext` on the capture delegate queue. The delegate hook only reads the shared injector
+- Decode or call `injectNext` on the capture delegate queue. `com.myvcam.match` reads the shared injector. The delegate hook only swaps a buffer that queue has already published
 - Mutate the original capture `sampleBuffer`. C1-B only swaps in a separate buffer when one is already stored
 - mediaserverd hooks, including `BWNodeOutput`
 - Photo, preview, or audio capture hooks
@@ -110,7 +112,7 @@ The inject path decodes without the state lock, then commits the injector retain
 
 ## How the feed runs
 
-On device, put a video at `/var/mobile/Documents/MyVCam/test.mp4`. Opening Camera calls `startRunning`, which does not start the feed. The first video sample schedules attach and start. The manager then injects on `com.myvcam.feed` until `stopRunning` or a feed error. `copyNextSampleBufferWithError:` is still a one-frame producer and does not call `VideoInjector`. A direct `injectNextSampleBufferWithError:` still pulls one frame; the feed calls that same method and shares its lock.
+On device, put a video at `/var/mobile/Documents/MyVCam/test.mp4`. Opening Camera calls `startRunning`, which does not start the feed. After 30 capture callbacks, `com.myvcam.enable` attaches and starts. `com.myvcam.match` builds replacements; the capture callback only swaps in a finished buffer. The manager injects on `com.myvcam.feed` until `stopRunning` or a feed error. `copyNextSampleBufferWithError:` is still a one-frame producer and does not call `VideoInjector`. A direct `injectNextSampleBufferWithError:` still pulls one frame; the feed calls that same method and shares its lock.
 
 ```objc
 MyVCamManager *manager = [MyVCamManager sharedManager];
@@ -135,7 +137,7 @@ if ([manager startWithError:&error]) {
 | `Sources/Core/MyVCamFrameSource.h` | Protocol. `lastError` distinguishes end of media from failure. |
 | `Sources/Core/MyVCamFrame.h` `.m` | Unchanged thin carrier. Unused by the new chain. |
 | `Sources/Inject/VideoInjector.h` `.m` | Latest-buffer sink. `prepare` returns `YES`. Armed non-NULL `inject` retains `_latest` and returns `YES`. `copyLatestSampleBufferMatchingOrigin:` returns a caller-owned buffer matched to the origin format, or `NULL`. |
-| `MyVCamTweak/Tweak.x` | C1-A delegate hook. C1-B passes a format-matched replacement into the original IMP for video only, otherwise the original `sampleBuffer`. C1-C starts the feed after the first video sample and stops it from `stopRunning`. |
+| `MyVCamTweak/Tweak.x` | C1-A delegate hook. C1-B passes a format-matched replacement into the original IMP for video only after `com.myvcam.match` has published one; otherwise the original `sampleBuffer`. C1-C starts the feed after 30 passthrough callbacks and stops it from `stopRunning` on `com.myvcam.enable`. |
 | `MyVCamTweak/MyVCamTweak.plist` | `com.apple.camera` only. |
 
 ## APIs
@@ -153,7 +155,7 @@ if ([manager startWithError:&error]) {
 | `-[SampleBufferBuilder sampleBufferWithPixelBuffer:presentationTime:duration:error:]` | Retained image sample buffer, or `NULL` plus an error. |
 | `-[VideoInjector prepareWithError:]` | `YES`. Local prepared flag only. |
 | `-[VideoInjector injectSampleBuffer:error:]` | `NO` with `NotPrepared` or `InvalidSampleBuffer`. Armed and non-`NULL` retains `_latest` and returns `YES`. |
-| `-[VideoInjector copyLatestSampleBufferMatchingOrigin:]` | Caller-owned image sample buffer timed like `origin` and matched to its pixel format and size, or `NULL`. `CFRelease` the result. Does not mutate `origin` or `_latest`. Non-video origin is `NULL`. |
+| `-[VideoInjector copyLatestSampleBufferMatchingOrigin:]` | Caller-owned image sample buffer timed like `origin` and matched to its pixel format and size, or `NULL`. `CFRelease` the result. Does not mutate `origin` or `_latest`. Non-video origin is `NULL`. Copies the origin camera intrinsic matrix when it is a `CFData`. The capture callback does not call this; `com.myvcam.match` does. |
 | `-[VideoInjector stop]` | Releases `_latest` and clears the prepared flag. |
 
 End of file on `copyNextSampleBufferWithError:` is `NULL` with a nil error. The same end on `injectNextSampleBufferWithError:` is `NO` with `MyVCamManagerErrorCodeEndOfMedia`. A reader failure returns the frame source's `lastError`. `-[MediaReader copyNextPixelBuffer]` before `prepareWithError:` returns `NULL` with `MyVCamMediaReaderErrorCodeNotPrepared`, which is not end of file.
@@ -177,11 +179,13 @@ Detail is in [Docs/THIRD_PARTY_MAP.md](Docs/THIRD_PARTY_MAP.md).
 
 ## Build locally
 
-Requires Theos and an iOS SDK new enough for `iphone:clang:latest:15.0`. Both Makefiles export `THEOS_PACKAGE_SCHEME=rootless`. `control` is `Architecture: iphoneos-arm64`, package version `0.2.4`.
+Requires Theos and an iOS SDK new enough for `iphone:clang:latest:15.0`. Both Makefiles export `THEOS_PACKAGE_SCHEME=rootless`. `control` is `Architecture: iphoneos-arm64`, package version `0.2.5`.
 
 ```sh
 export THEOS=$HOME/theos
 make package
 ```
 
-The Linux toolchain used by Actions warns that the `arm64e` objects were built with an incompatible arm64e ABI. The link still produces a merged dylib. Confirm that slice on a device before relying on it. There is no device install in this tree.
+The tweak is built `arm64` only. iPhone 12 is arm64e, and the Linux toolchain's arm64e slice uses a pointer-auth ABI that does not match iOS 15. Shipping that slice makes dyld load it and abort Camera at the first call. ElleKit on Dopamine loads the arm64 slice into the arm64e Camera process. There is no device install in this tree.
+
+Why 0.2.4 still force-quit Camera on first open, and what 0.2.5 changes, is in [Docs/LAUNCH_CRASH_0.2.5.md](Docs/LAUNCH_CRASH_0.2.5.md).

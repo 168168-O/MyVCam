@@ -110,12 +110,16 @@ jobs:
           fi
           archs="$("$lipo_bin" -info "$merged")"
           printf '%s\n' "$archs"
-          for required in arm64 arm64e; do
-            if [[ ! "$archs" =~ (^|[^[:alnum:]_])${required}([^[:alnum:]_]|$) ]]; then
-              echo "merged dylib is missing ${required}: ${archs}" >&2
-              exit 1
-            fi
-          done
+          if [[ ! "$archs" =~ (^|[^[:alnum:]_])arm64([^[:alnum:]_]|$) ]]; then
+            echo "merged dylib is missing arm64: ${archs}" >&2
+            exit 1
+          fi
+          # iPhone 12 loads arm64e when that slice exists. The Linux toolchain's
+          # arm64e ABI is incompatible and aborts Camera at the first call.
+          if [[ "$archs" =~ (^|[^[:alnum:]_])arm64e([^[:alnum:]_]|$) ]]; then
+            echo "merged dylib must not contain arm64e: ${archs}" >&2
+            exit 1
+          fi
           for class_name in MyVCamManager MediaReader SampleBufferBuilder VideoInjector MyVCamFrame; do
             if ! grep -a -q "$class_name" "$merged"; then
               echo "merged dylib is missing ${class_name}" >&2
@@ -144,6 +148,18 @@ jobs:
           fi
           if ! grep -a -F 'com.myvcam.feed' "$merged"; then
             echo "merged dylib is missing the C1-C feed queue label" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'com.myvcam.match' "$merged"; then
+            echo "merged dylib is missing the off-queue match label" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'passthrough warmup finished' "$merged"; then
+            echo "merged dylib is missing the passthrough warmup log" >&2
+            exit 1
+          fi
+          if ! grep -a -F '/var/mobile/Documents/MyVCam/disable' "$merged"; then
+            echo "merged dylib is missing the disable-file path" >&2
             exit 1
           fi
           mkdir -p artifacts
@@ -185,8 +201,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.4' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.4" >&2
+          if ! grep -q '^Version: 0.2.5' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.5" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"

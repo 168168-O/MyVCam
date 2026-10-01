@@ -41,7 +41,9 @@ typedef NS_ENUM(NSInteger, MyVCamSampleBufferBuilderErrorCode) {
 /// Builds one image sample buffer. Caller owns the result (CF_RETURNS_RETAINED).
 /// NULL is failure. A non-positive or non-numeric duration is replaced with
 /// 1/30 second. decodeTimeStamp is kCMTimeInvalid.
+/// The sample-attachment array is created and marked display-immediately.
 /// Does not retain extra ownership of pixelBuffer beyond what CoreMedia takes.
+/// Does not copy attachments from a camera buffer.
 - (CMSampleBufferRef _Nullable)sampleBufferWithPixelBuffer:(CVPixelBufferRef _Nullable)pixelBuffer
                                           presentationTime:(CMTime)presentationTime
                                                   duration:(CMTime)duration

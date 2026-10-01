@@ -98,6 +98,19 @@ static CMTime MyVCamDurationOrFallback(CMTime duration) {
         return NULL;
     }
 
+    // Callers that read the sample-attachment array without a NULL check need
+    // the array to exist. The element is a mutable dictionary when CoreMedia
+    // created it; any other type is left alone.
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true);
+    if (attachments != NULL && CFArrayGetCount(attachments) > 0) {
+        CFTypeRef value = CFArrayGetValueAtIndex(attachments, 0);
+        if (value != NULL && CFGetTypeID(value) == CFDictionaryGetTypeID()) {
+            CFDictionarySetValue((CFMutableDictionaryRef)value,
+                                 kCMSampleAttachmentKey_DisplayImmediately,
+                                 kCFBooleanTrue);
+        }
+    }
+
     if (error != NULL) {
         *error = nil;
     }
