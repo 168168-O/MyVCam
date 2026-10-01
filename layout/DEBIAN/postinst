@@ -1,0 +1,27 @@
+#!/bin/sh
+# Copy the test video into /var/jb before Camera is opened, and keep the
+# helper loaded so a later replace of test.mp4 is mirrored too.
+
+MIRROR="/var/jb/usr/bin/myvcam-mirror"
+PLIST="/var/jb/Library/LaunchDaemons/com.myvcam.mirror.plist"
+LAUNCHCTL=""
+
+if [ -x /var/jb/usr/bin/launchctl ]; then
+    LAUNCHCTL="/var/jb/usr/bin/launchctl"
+elif [ -x /var/jb/bin/launchctl ]; then
+    LAUNCHCTL="/var/jb/bin/launchctl"
+fi
+
+if [ -n "$LAUNCHCTL" ] && [ -f "$PLIST" ]; then
+    "$LAUNCHCTL" bootout system/com.myvcam.mirror >/dev/null 2>&1 || true
+    "$LAUNCHCTL" bootstrap system "$PLIST" >/dev/null 2>&1 || \
+        "$LAUNCHCTL" load -w "$PLIST" >/dev/null 2>&1 || true
+    "$LAUNCHCTL" enable system/com.myvcam.mirror >/dev/null 2>&1 || true
+    "$LAUNCHCTL" kickstart -k system/com.myvcam.mirror >/dev/null 2>&1 || true
+fi
+
+if [ -x "$MIRROR" ]; then
+    "$MIRROR" || true
+fi
+
+exit 0

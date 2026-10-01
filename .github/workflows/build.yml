@@ -170,6 +170,10 @@ jobs:
             echo "merged dylib is missing the disable-file path" >&2
             exit 1
           fi
+          if ! grep -a -F '/var/jb/var/mobile/Library/MyVCam/test.mp4' "$merged"; then
+            echo "merged dylib is missing the rootless mirror path" >&2
+            exit 1
+          fi
           mkdir -p artifacts
           cp -v "$merged" artifacts/MyVCamTweak.dylib
 
@@ -209,8 +213,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.6' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.6" >&2
+          if ! grep -q '^Version: 0.2.7' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.7" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"
@@ -233,6 +237,33 @@ jobs:
           fi
           if grep -E '<string>[^<]*(mediaserverd|SpringBoard)[^<]*</string>' "${plists[0]}"; then
             echo "packaged filter names a real process" >&2
+            exit 1
+          fi
+          mapfile -t mirrors < <(find "$extracted" -name 'myvcam-mirror' -type f -print)
+          mapfile -t mirror_plists < <(find "$extracted" -name 'com.myvcam.mirror.plist' -print)
+          if [[ ${#mirrors[@]} -ne 1 || ${#mirror_plists[@]} -ne 1 ]]; then
+            echo "deb layout is missing myvcam-mirror or its launch daemon" >&2
+            exit 1
+          fi
+          lipo_bin=""
+          for candidate in lipo llvm-lipo; do
+            if [[ -x "$THEOS/toolchain/linux/iphone/bin/$candidate" ]]; then
+              lipo_bin="$THEOS/toolchain/linux/iphone/bin/$candidate"
+              break
+            fi
+          done
+          if [[ -z "$lipo_bin" ]]; then
+            echo "toolchain has no lipo" >&2
+            exit 1
+          fi
+          mirror_archs="$("$lipo_bin" -info "${mirrors[0]}")"
+          printf '%s\n' "$mirror_archs"
+          if [[ ! "$mirror_archs" =~ (^|[^[:alnum:]_])arm64([^[:alnum:]_]|$) ]]; then
+            echo "myvcam-mirror is missing arm64: ${mirror_archs}" >&2
+            exit 1
+          fi
+          if [[ "$mirror_archs" =~ (^|[^[:alnum:]_])arm64e([^[:alnum:]_]|$) ]]; then
+            echo "myvcam-mirror must not contain arm64e: ${mirror_archs}" >&2
             exit 1
           fi
 

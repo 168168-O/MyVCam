@@ -59,7 +59,8 @@ The test video is a fixed path. There is no preferences UI and the file is not i
 That string is `MyVCamManagerTestVideoPathUTF8`. `Tweak.x` hooks `-[AVCaptureSession startRunning]` and `-[AVCaptureSession stopRunning]`.
 
 - `startRunning` calls the original implementation, then, if the session is running, records that a capture session is up. It does not open the file on that thread. The next turn of `com.myvcam.enable` attaches and calls `-[MyVCamManager startWithError:]`. That queue is not the sample-buffer queue and not `startRunning`. A redundant `startRunning` while the session is already recorded does not reset the feed. `stopRunning` stops the feed only when the session actually stops, and not when Camera calls `stopRunning` from inside `startRunning`. A missing file, an unreadable file, a directory, or any other prepare failure returns `NO` with `PrepareFailed`. The timer is not armed and the process does not crash. The log is `[MyVCam C1-C] feed not started path=...` or `feed not started: test video not readable path=... errno=...`. The warmup log is `[MyVCam C1-C] passthrough warmup finished (session up)`.
-- The Camera viewfinder is an `AVCaptureVideoPreviewLayer`. It does not call `captureOutput:didOutputSampleBuffer:fromConnection:`, so swapping that delegate cannot change the preview. While the feed is running, each preview layer gets an `AVSampleBufferDisplayLayer` sublayer that enqueues `VideoInjector`'s latest frame. The log is `[MyVCam C1-C] preview showing imported video`.
+- The Camera viewfinder is an `AVCaptureVideoPreviewLayer`. It does not call `captureOutput:didOutputSampleBuffer:fromConnection:`, so swapping that delegate cannot change the preview. While the feed is running, an `AVSampleBufferDisplayLayer` is inserted as the next sibling above each preview layer and enqueues an IOSurface-backed copy of `VideoInjector`'s latest frame. A sublayer of the preview stays behind the live image. The log is `[MyVCam C1-C] preview showing imported video`.
+- Camera cannot read `/var/mobile/Documents`. `myvcam-mirror` copies `test.mp4` to `/var/jb/var/mobile/Library/MyVCam/test.mp4`, which this process can read. The Documents path is still the file you put on the device. The same helper mirrors the disable file.
 - Creating `/var/mobile/Documents/MyVCam/disable` skips the feed and the replacement. The delegate hook stays installed and keeps passing the camera sample through, and the preview overlay is not added. Delete that file and reopen Camera to re-enable. The log is `[MyVCam C1-C] feed not started: disable file ...`.
 - `stopRunning` records the stop, calls the original implementation, and stops the manager on `com.myvcam.enable`. It does not call `MediaReader` on the session thread. The log is `[MyVCam C1-C] capture session stopped the feed`.
 
@@ -87,7 +88,7 @@ GitHub Actions workflow `Compile MyVCam` builds the rootless tweak on `main` and
 - Decode or call `injectNext` on the capture delegate queue. `com.myvcam.match` reads the shared injector. The delegate hook only swaps a buffer that queue has already published. The viewfinder overlay also reads the injector, on the main queue, and does not decode
 - Mutate the original capture `sampleBuffer`. C1-B only swaps in a separate buffer when one is already stored
 - mediaserverd hooks, including `BWNodeOutput`
-- Photo capture or audio capture hooks. The viewfinder overlay is an `AVSampleBufferDisplayLayer` on `AVCaptureVideoPreviewLayer`; it does not replace photo output
+- Photo capture or audio capture hooks. The viewfinder overlay is an `AVSampleBufferDisplayLayer` above `AVCaptureVideoPreviewLayer`; it does not replace photo output
 - Report inject success when `VideoInjector` returns `NotImplemented`
 - Match the file's nominal frame rate, play audio, or rotate frames. The feed is fixed 30 fps. C1-B copies origin timing and matches origin dimensions and pixel format (`32BGRA`, `420f`, `420v`). It does not alias the camera buffer's attachments
 - RTSP, HLS, MJPEG, or Murk `AVAssetStreamAdapter`
@@ -113,7 +114,7 @@ The inject path decodes without the state lock, then commits the injector retain
 
 ## How the feed runs
 
-On device, put a video at `/var/mobile/Documents/MyVCam/test.mp4`. Opening Camera calls `startRunning`, which does not start the feed on that thread. The next turn of `com.myvcam.enable` attaches and starts when that file is readable and the disable file is absent. `com.myvcam.match` builds replacements; the capture callback only swaps in a finished buffer. The viewfinder overlay enqueues the injector's latest frame onto an `AVSampleBufferDisplayLayer` above `AVCaptureVideoPreviewLayer`. The manager injects on `com.myvcam.feed` until a real `stopRunning` or a feed error. `copyNextSampleBufferWithError:` is still a one-frame producer and does not call `VideoInjector`. A direct `injectNextSampleBufferWithError:` still pulls one frame; the feed calls that same method and shares its lock.
+On device, put a video at `/var/mobile/Documents/MyVCam/test.mp4`. Opening Camera calls `startRunning`, which does not start the feed on that thread. The next turn of `com.myvcam.enable` attaches and starts when that file or its `/var/jb` mirror is readable and the disable file is absent. `com.myvcam.match` builds replacements; the capture callback only swaps in a finished buffer. The viewfinder overlay enqueues an IOSurface-backed copy of the injector's latest frame onto an `AVSampleBufferDisplayLayer` that sits immediately above `AVCaptureVideoPreviewLayer`. The manager injects on `com.myvcam.feed` until a real `stopRunning` or a feed error. `copyNextSampleBufferWithError:` is still a one-frame producer and does not call `VideoInjector`. A direct `injectNextSampleBufferWithError:` still pulls one frame; the feed calls that same method and shares its lock.
 
 ```objc
 MyVCamManager *manager = [MyVCamManager sharedManager];
@@ -138,7 +139,7 @@ if ([manager startWithError:&error]) {
 | `Sources/Core/MyVCamFrameSource.h` | Protocol. `lastError` distinguishes end of media from failure. |
 | `Sources/Core/MyVCamFrame.h` `.m` | Unchanged thin carrier. Unused by the new chain. |
 | `Sources/Inject/VideoInjector.h` `.m` | Latest-buffer sink. `prepare` returns `YES`. Armed non-NULL `inject` retains `_latest` and returns `YES`. `copyLatestSampleBufferMatchingOrigin:` returns a caller-owned buffer matched to the origin format, or `NULL`. |
-| `MyVCamTweak/Tweak.x` | C1-A delegate hook. C1-B passes a format-matched replacement into the original IMP for video only after `com.myvcam.match` has published one; otherwise the original `sampleBuffer`. C1-C starts the feed on `com.myvcam.enable` after `startRunning` returns, stops it from a real `stopRunning`, and shows the injector's latest frame on `AVCaptureVideoPreviewLayer`. |
+| `MyVCamTweak/Tweak.x` | C1-A delegate hook. C1-B passes a format-matched replacement into the original IMP for video only after `com.myvcam.match` has published one; otherwise the original `sampleBuffer`. C1-C starts the feed on `com.myvcam.enable` after `startRunning` returns, stops it from a real `stopRunning`, and shows the injector's latest frame above `AVCaptureVideoPreviewLayer`. |
 | `MyVCamTweak/MyVCamTweak.plist` | `com.apple.camera` only. |
 
 ## APIs
@@ -181,7 +182,7 @@ Detail is in [Docs/THIRD_PARTY_MAP.md](Docs/THIRD_PARTY_MAP.md).
 
 ## Build locally
 
-Requires Theos and an iOS SDK new enough for `iphone:clang:latest:15.0`. Both Makefiles export `THEOS_PACKAGE_SCHEME=rootless`. `control` is `Architecture: iphoneos-arm64`, package version `0.2.6`.
+Requires Theos and an iOS SDK new enough for `iphone:clang:latest:15.0`. The Makefiles export `THEOS_PACKAGE_SCHEME=rootless`. `control` is `Architecture: iphoneos-arm64`, package version `0.2.7`.
 
 ```sh
 export THEOS=$HOME/theos
@@ -190,4 +191,4 @@ make package
 
 The tweak is built `arm64` only. iPhone 12 is arm64e, and the Linux toolchain's arm64e slice uses a pointer-auth ABI that does not match iOS 15. Shipping that slice makes dyld load it and abort Camera at the first call. ElleKit on Dopamine loads the arm64 slice into the arm64e Camera process. There is no device install in this tree.
 
-Why 0.2.4 still force-quit Camera on first open, and what 0.2.5 changes, is in [Docs/LAUNCH_CRASH_0.2.5.md](Docs/LAUNCH_CRASH_0.2.5.md). Why 0.2.5 can leave the viewfinder on the live camera, and what 0.2.6 changes, is in [Docs/PREVIEW_PASSTHROUGH_0.2.6.md](Docs/PREVIEW_PASSTHROUGH_0.2.6.md).
+Why 0.2.4 still force-quit Camera on first open, and what 0.2.5 changes, is in [Docs/LAUNCH_CRASH_0.2.5.md](Docs/LAUNCH_CRASH_0.2.5.md). Why 0.2.5 can leave the viewfinder on the live camera, and what 0.2.6 changes, is in [Docs/PREVIEW_PASSTHROUGH_0.2.6.md](Docs/PREVIEW_PASSTHROUGH_0.2.6.md). Why 0.2.6 can still leave that viewfinder on the live camera when `test.mp4` is on disk, and what 0.2.7 changes, is in [Docs/PREVIEW_FEED_0.2.7.md](Docs/PREVIEW_FEED_0.2.7.md).
