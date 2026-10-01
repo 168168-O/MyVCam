@@ -12,21 +12,102 @@
 //  first. stop and dealloc CFRelease _latest. The caller's original retain
 //  is not released here.
 //
+//  copyLatestSampleBufferMatchingOrigin: CFRetains _latest under _lock, then
+//  builds a new image sample buffer outside the lock. The new buffer uses
+//  the latest image buffer and the origin sample's timing. The stored
+//  buffer and the origin buffer are not mutated. Create failure returns NULL.
+//
 //  Every read, replace, and release of _latest runs under _lock.
 //
 //  LAYERING: do not import MediaReader.h, SampleBufferBuilder.h, or
-//  MyVCamManager.h.
+//  MyVCamManager.h. The restamp sequence below is the same CoreMedia pair
+//  SampleBufferBuilder uses, written here so this file does not import it.
 //
 //  Later reference (not ported): DiCoy AVFoundation hooks.
 //  Ethan mediaserverd injection stays deferred.
 //
 
 #import "VideoInjector.h"
+#import <CoreVideo/CoreVideo.h>
 #import <os/lock.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 NSString * const MyVCamVideoInjectorErrorDomain = @"MyVCamVideoInjectorErrorDomain";
+
+static const int32_t kMyVCamInjectorFallbackFramesPerSecond = 30;
+
+static CMTime MyVCamInjectorDurationOrFallback(CMTime duration) {
+    if (CMTIME_IS_NUMERIC(duration) && CMTimeCompare(duration, kCMTimeZero) > 0) {
+        return duration;
+    }
+    return CMTimeMake(1, kMyVCamInjectorFallbackFramesPerSecond);
+}
+
+static CMTime MyVCamInjectorPresentationTime(CMSampleBufferRef sampleBuffer) {
+    CMTime presentationTime = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer);
+    if (CMTIME_IS_NUMERIC(presentationTime)) {
+        return presentationTime;
+    }
+    return CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+}
+
+static CMTime MyVCamInjectorDuration(CMSampleBufferRef sampleBuffer) {
+    CMTime duration = CMSampleBufferGetOutputDuration(sampleBuffer);
+    if (CMTIME_IS_NUMERIC(duration) && CMTimeCompare(duration, kCMTimeZero) > 0) {
+        return duration;
+    }
+    return MyVCamInjectorDurationOrFallback(CMSampleBufferGetDuration(sampleBuffer));
+}
+
+/// New image sample buffer (+1). Pixels from `latest`, timing from `origin`.
+/// NULL when either buffer cannot supply what the create call needs.
+static CMSampleBufferRef _Nullable MyVCamInjectorCreateMatchingOrigin(CMSampleBufferRef latest,
+                                                                       CMSampleBufferRef origin) CF_RETURNS_RETAINED {
+    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(latest);
+    if (pixelBuffer == NULL) {
+        return NULL;
+    }
+
+    CMTime presentationTime = MyVCamInjectorPresentationTime(origin);
+    if (!CMTIME_IS_NUMERIC(presentationTime)) {
+        return NULL;
+    }
+
+    CMVideoFormatDescriptionRef formatDescription = NULL;
+    OSStatus formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,
+                                                                          pixelBuffer,
+                                                                          &formatDescription);
+    if (formatStatus != noErr || formatDescription == NULL) {
+        if (formatDescription != NULL) {
+            CFRelease(formatDescription);
+        }
+        return NULL;
+    }
+
+    CMSampleTimingInfo timing = {
+        .duration = MyVCamInjectorDuration(origin),
+        .presentationTimeStamp = presentationTime,
+        .decodeTimeStamp = kCMTimeInvalid,
+    };
+    CMSampleBufferRef sampleBuffer = NULL;
+    OSStatus sampleStatus = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,
+                                                                pixelBuffer,
+                                                                YES,
+                                                                NULL,
+                                                                NULL,
+                                                                formatDescription,
+                                                                &timing,
+                                                                &sampleBuffer);
+    CFRelease(formatDescription);
+    if (sampleStatus != noErr || sampleBuffer == NULL) {
+        if (sampleBuffer != NULL) {
+            CFRelease(sampleBuffer);
+        }
+        return NULL;
+    }
+    return sampleBuffer;
+}
 
 @implementation VideoInjector {
     os_unfair_lock _lock;
@@ -109,6 +190,27 @@ NSString * const MyVCamVideoInjectorErrorDomain = @"MyVCamVideoInjectorErrorDoma
     }
     _prepared = NO;
     os_unfair_lock_unlock(&_lock);
+}
+
+- (CMSampleBufferRef _Nullable)copyLatestSampleBufferMatchingOrigin:(CMSampleBufferRef)origin {
+    if (origin == NULL) {
+        return NULL;
+    }
+
+    os_unfair_lock_lock(&_lock);
+    CMSampleBufferRef latest = _latest;
+    if (latest != NULL) {
+        CFRetain(latest);
+    }
+    os_unfair_lock_unlock(&_lock);
+
+    if (latest == NULL) {
+        return NULL;
+    }
+
+    CMSampleBufferRef replacement = MyVCamInjectorCreateMatchingOrigin(latest, origin);
+    CFRelease(latest);
+    return replacement;
 }
 
 - (NSError *)errorWithCode:(MyVCamVideoInjectorErrorCode)code

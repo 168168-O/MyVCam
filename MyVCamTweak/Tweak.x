@@ -2,14 +2,17 @@
 //  Tweak.x
 //  MyVCam
 //
-//  C1-A: verify the in-process Camera capture hook chain.
-//  Hook AVCaptureVideoDataOutput -setSampleBufferDelegate:queue:, then
-//  hook that delegate class's
+//  C1-A: hook AVCaptureVideoDataOutput -setSampleBufferDelegate:queue:,
+//  then hook that delegate class's
 //  -captureOutput:didOutputSampleBuffer:fromConnection: once.
-//  The delegate hook logs once per class and calls the original
-//  implementation with the original sampleBuffer. It does not replace,
-//  copy, or mutate the buffer, and it does not call VideoInjector or
-//  MyVCamManager.
+//
+//  C1-B: the same delegate hook reads VideoInjector. When
+//  copyLatestSampleBufferMatchingOrigin: returns a buffer, the original
+//  IMP is called with that replacement and the replacement is CFReleased.
+//  When it returns NULL, the original IMP is called with the original
+//  sampleBuffer. The original sampleBuffer is never mutated.
+//  This file does not start a capture session, does not arm a timer, and
+//  does not call inject or injectNext.
 //
 //  MyVCamTweak.plist matches com.apple.camera only.
 //
@@ -21,6 +24,8 @@
 #import <os/lock.h>
 #import <stdlib.h>
 #import <substrate.h>
+#import "MyVCamManager.h"
+#import "VideoInjector.h"
 
 typedef void (*MyVCamC1ACaptureOutputIMP)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *);
 
@@ -37,6 +42,9 @@ static NSMutableSet *gLoggedClasses;
 static NSMutableSet *gMissingClasses;
 static os_unfair_lock gLock = OS_UNFAIR_LOCK_INIT;
 static const char kMyVCamC1APrefix[] = "[MyVCam C1-A]";
+static const char kMyVCamC1BPrefix[] = "[MyVCam C1-B]";
+static BOOL gC1BLoggedPassThrough = NO;
+static BOOL gC1BLoggedReplace = NO;
 
 static void MyVCamC1A_InitState(void) {
     static dispatch_once_t onceToken;
@@ -96,6 +104,29 @@ static Class MyVCamC1A_ImplementingClass(Class start, SEL selector) {
     return Nil;
 }
 
+static void MyVCamC1B_LogPathOnce(BOOL replaced) {
+    BOOL shouldLog = NO;
+    os_unfair_lock_lock(&gLock);
+    if (replaced) {
+        if (!gC1BLoggedReplace) {
+            gC1BLoggedReplace = YES;
+            shouldLog = YES;
+        }
+    } else if (!gC1BLoggedPassThrough) {
+        gC1BLoggedPassThrough = YES;
+        shouldLog = YES;
+    }
+    os_unfair_lock_unlock(&gLock);
+    if (!shouldLog) {
+        return;
+    }
+    if (replaced) {
+        NSLog(@"%s replaced sampleBuffer with VideoInjector latest", kMyVCamC1BPrefix);
+    } else {
+        NSLog(@"%s pass-through original sampleBuffer", kMyVCamC1BPrefix);
+    }
+}
+
 static void MyVCamC1A_DidOutput(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
     IMP original = NULL;
     Class notedClass = Nil;
@@ -121,8 +152,20 @@ static void MyVCamC1A_DidOutput(id self, SEL _cmd, AVCaptureOutput *output, CMSa
     }
 
     if (original != NULL) {
-        // Same pointer the camera produced. Do not replace or mutate it.
-        ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
+        // Caller-owned when non-NULL. The camera buffer itself is not written.
+        CMSampleBufferRef replacement = NULL;
+        if (sampleBuffer != NULL) {
+            VideoInjector *injector = [[MyVCamManager sharedManager] videoInjector];
+            replacement = [injector copyLatestSampleBufferMatchingOrigin:sampleBuffer];
+        }
+        if (replacement != NULL) {
+            MyVCamC1B_LogPathOnce(YES);
+            ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, replacement, connection);
+            CFRelease(replacement);
+        } else {
+            MyVCamC1B_LogPathOnce(NO);
+            ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
+        }
     }
 }
 
