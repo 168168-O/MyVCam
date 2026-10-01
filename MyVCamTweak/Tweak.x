@@ -5,24 +5,34 @@
 //  C1-A: hook AVCaptureVideoDataOutput -setSampleBufferDelegate:queue:,
 //  then hook that delegate class's
 //  -captureOutput:didOutputSampleBuffer:fromConnection: once.
+//  The hook is installed only when the method encoding is the void instance
+//  method Camera uses. A NULL original IMP is never called.
 //
-//  C1-B: the same delegate hook reads VideoInjector. When
-//  copyLatestSampleBufferMatchingOrigin: returns a buffer, the original
-//  IMP is called with that replacement and the replacement is CFReleased.
-//  When it returns NULL, the original IMP is called with the original
-//  sampleBuffer. The original sampleBuffer is never mutated.
+//  C1-B: the same delegate hook reads VideoInjector for video image buffers
+//  only. Audio (and any other non-image sample) is passed through untouched.
+//  When copyLatestSampleBufferMatchingOrigin: returns a buffer, the original
+//  IMP is called with that replacement. The camera-owned sampleBuffer is
+//  never CFReleased and never written. The replacement stays retained across
+//  the callback (last two deliveries) because Camera may use the pointer
+//  after the callback returns.
+//  When the copy returns NULL, the original IMP is called with the original
+//  sampleBuffer. NULL covers "no frame yet" and "origin format was not matched".
 //  The delegate hook does not call inject or injectNext and does not arm
 //  a timer. That work stays on MyVCamManager's feed queue.
 //
-//  C1-C: AVCaptureSession startRunning attaches the fixed test video and
-//  calls startWithError:. stopRunning calls stop. The manager owns the
-//  30 fps loop. This file does not decode and does not touch mediaserverd.
+//  C1-C: AVCaptureSession startRunning only records that a session is up.
+//  It does not attach, prepare, or decode. The first video delegate callback
+//  schedules attach+start on a background queue after the main queue has had
+//  a turn, so startRunning is not blocked and the feed does not run inside it.
+//  stopRunning calls stop before the original implementation. The manager owns
+//  the 30 fps loop. This file does not decode and does not touch mediaserverd.
 //
 //  MyVCamTweak.plist matches com.apple.camera only.
 //
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <os/lock.h>
@@ -50,6 +60,10 @@ static const char kMyVCamC1BPrefix[] = "[MyVCam C1-B]";
 static const char kMyVCamC1CPrefix[] = "[MyVCam C1-C]";
 static BOOL gC1BLoggedPassThrough = NO;
 static BOOL gC1BLoggedReplace = NO;
+static BOOL gCaptureSessionRunning = NO;
+static BOOL gFeedStartRequested = NO;
+static uint64_t gSessionGeneration = 0;
+static CMSampleBufferRef gHandoff[2] = {NULL, NULL};
 
 static void MyVCamC1A_InitState(void) {
     static dispatch_once_t onceToken;
@@ -109,6 +123,18 @@ static Class MyVCamC1A_ImplementingClass(Class start, SEL selector) {
     return Nil;
 }
 
+static BOOL MyVCamC1A_EncodingCanCall(Method method) {
+    if (method == NULL) {
+        return NO;
+    }
+    // self, _cmd, output, sampleBuffer, connection.
+    if (method_getNumberOfArguments(method) != 5) {
+        return NO;
+    }
+    const char *encoding = method_getTypeEncoding(method);
+    return encoding != NULL && encoding[0] == 'v';
+}
+
 static void MyVCamC1B_LogPathOnce(BOOL replaced) {
     BOOL shouldLog = NO;
     os_unfair_lock_lock(&gLock);
@@ -132,7 +158,121 @@ static void MyVCamC1B_LogPathOnce(BOOL replaced) {
     }
 }
 
+static BOOL MyVCamC1B_OriginIsVideoImage(CMSampleBufferRef sampleBuffer) {
+    if (sampleBuffer == NULL || !CMSampleBufferIsValid(sampleBuffer)) {
+        return NO;
+    }
+    if (CMSampleBufferGetImageBuffer(sampleBuffer) == NULL) {
+        return NO;
+    }
+    CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (format == NULL) {
+        return NO;
+    }
+    return CMFormatDescriptionGetMediaType(format) == kCMMediaType_Video;
+}
+
+/// Takes ownership of `owned` (+1 or NULL). Retires the delivery from two
+/// callbacks ago. The camera buffer is never stored here.
+static void MyVCamC1B_StoreHandoff(CMSampleBufferRef owned) {
+    CMSampleBufferRef retired = NULL;
+    os_unfair_lock_lock(&gLock);
+    retired = gHandoff[1];
+    gHandoff[1] = gHandoff[0];
+    gHandoff[0] = owned;
+    os_unfair_lock_unlock(&gLock);
+    if (retired != NULL) {
+        CFRelease(retired);
+    }
+}
+
+static void MyVCamC1C_SessionDidStart(uint64_t generation) {
+    // Runs off the capture delegate queue and off -startRunning. A missing
+    // file returns NO and does not arm the timer. If the session stopped
+    // while prepare was in flight, stop again so a late arm does not keep
+    // decoding into a dead session.
+    os_unfair_lock_lock(&gLock);
+    BOOL current = gCaptureSessionRunning && gSessionGeneration == generation;
+    os_unfair_lock_unlock(&gLock);
+    if (!current) {
+        return;
+    }
+
+    MyVCamManager *manager = [MyVCamManager sharedManager];
+    NSString *path = [NSString stringWithUTF8String:MyVCamManagerTestVideoPathUTF8];
+    if (path.length == 0) {
+        NSLog(@"%s feed not started: test video path is empty", kMyVCamC1CPrefix);
+        return;
+    }
+    NSURL *fileURL = [NSURL fileURLWithPath:path isDirectory:NO];
+    [manager attachMediaFileURL:fileURL];
+    NSError *error = nil;
+    BOOL started = [manager startWithError:&error];
+    os_unfair_lock_lock(&gLock);
+    current = gCaptureSessionRunning && gSessionGeneration == generation;
+    os_unfair_lock_unlock(&gLock);
+    if (!current) {
+        [manager stop];
+        NSLog(@"%s feed not started: capture session ended during prepare", kMyVCamC1CPrefix);
+        return;
+    }
+    if (!started) {
+        NSLog(@"%s feed not started path=%s error=%@", kMyVCamC1CPrefix, MyVCamManagerTestVideoPathUTF8, error);
+        return;
+    }
+    NSLog(@"%s feed started path=%s", kMyVCamC1CPrefix, MyVCamManagerTestVideoPathUTF8);
+}
+
+static void MyVCamC1C_NoteSessionStarted(void) {
+    os_unfair_lock_lock(&gLock);
+    gCaptureSessionRunning = YES;
+    gSessionGeneration += 1;
+    gFeedStartRequested = NO;
+    os_unfair_lock_unlock(&gLock);
+}
+
+static void MyVCamC1C_NoteSessionStopped(void) {
+    os_unfair_lock_lock(&gLock);
+    gCaptureSessionRunning = NO;
+    gSessionGeneration += 1;
+    gFeedStartRequested = NO;
+    os_unfair_lock_unlock(&gLock);
+    [[MyVCamManager sharedManager] stop];
+    NSLog(@"%s capture session stopped the feed", kMyVCamC1CPrefix);
+}
+
+static void MyVCamC1C_RequestFeedStart(void) {
+    uint64_t generation = 0;
+    os_unfair_lock_lock(&gLock);
+    if (!gCaptureSessionRunning || gFeedStartRequested) {
+        os_unfair_lock_unlock(&gLock);
+        return;
+    }
+    gFeedStartRequested = YES;
+    generation = gSessionGeneration;
+    os_unfair_lock_unlock(&gLock);
+
+    NSLog(@"%s feed deferred until after the first video sample", kMyVCamC1CPrefix);
+    // Bounce through the main queue first so a callback delivered inside
+    // -startRunning does not prepare until that call can return.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            os_unfair_lock_lock(&gLock);
+            BOOL current = gCaptureSessionRunning && gSessionGeneration == generation;
+            os_unfair_lock_unlock(&gLock);
+            if (!current) {
+                return;
+            }
+            MyVCamC1C_SessionDidStart(generation);
+        });
+    });
+}
+
 static void MyVCamC1A_DidOutput(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
+    if (self == nil) {
+        return;
+    }
+
     IMP original = NULL;
     Class notedClass = Nil;
     BOOL missingOriginal = NO;
@@ -156,21 +296,32 @@ static void MyVCamC1A_DidOutput(id self, SEL _cmd, AVCaptureOutput *output, CMSa
         }
     }
 
-    if (original != NULL) {
-        // Caller-owned when non-NULL. The camera buffer itself is not written.
-        CMSampleBufferRef replacement = NULL;
-        if (sampleBuffer != NULL) {
-            VideoInjector *injector = [[MyVCamManager sharedManager] videoInjector];
-            replacement = [injector copyLatestSampleBufferMatchingOrigin:sampleBuffer];
-        }
-        if (replacement != NULL) {
-            MyVCamC1B_LogPathOnce(YES);
-            ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, replacement, connection);
-            CFRelease(replacement);
-        } else {
-            MyVCamC1B_LogPathOnce(NO);
-            ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
-        }
+    if (original == NULL || original == (IMP)MyVCamC1A_DidOutput) {
+        return;
+    }
+
+    // Same selector as the audio data-output delegate. Substituting a video
+    // buffer there crashes Camera on the first callback after a frame exists.
+    if (!MyVCamC1B_OriginIsVideoImage(sampleBuffer)) {
+        ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
+        return;
+    }
+
+    MyVCamC1C_RequestFeedStart();
+
+    CMSampleBufferRef replacement = NULL;
+    VideoInjector *injector = [[MyVCamManager sharedManager] videoInjector];
+    if (injector != nil && sampleBuffer != NULL) {
+        replacement = [injector copyLatestSampleBufferMatchingOrigin:sampleBuffer];
+    }
+    if (replacement != NULL) {
+        MyVCamC1B_LogPathOnce(YES);
+        ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, replacement, connection);
+        // Keep this buffer alive past the callback. Do not release sampleBuffer.
+        MyVCamC1B_StoreHandoff(replacement);
+    } else {
+        MyVCamC1B_LogPathOnce(NO);
+        ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
     }
 }
 
@@ -213,6 +364,13 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
         os_unfair_lock_unlock(&gLock);
         return;
     }
+    if (!MyVCamC1A_EncodingCanCall(method)) {
+        [gHookedClasses addObject:(id)implClass];
+        os_unfair_lock_unlock(&gLock);
+        const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+        NSLog(@"%s refused to hook %@ encoding=%s", kMyVCamC1APrefix, NSStringFromClass(implClass), encoding != NULL ? encoding : "");
+        return;
+    }
 
     [gHookedClasses addObject:(id)implClass];
     IMP replaced = NULL;
@@ -227,31 +385,6 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
     NSLog(@"%s hooked captureOutput:didOutputSampleBuffer:fromConnection: on %@", kMyVCamC1APrefix, NSStringFromClass(implClass));
 }
 
-static void MyVCamC1C_SessionDidStart(void) {
-    // Attach and start on the thread that called startRunning. Frame pulls
-    // happen later, on the manager's feed queue, not on this thread and not
-    // on the sample-buffer delegate queue. A missing file returns NO.
-    MyVCamManager *manager = [MyVCamManager sharedManager];
-    NSString *path = [NSString stringWithUTF8String:MyVCamManagerTestVideoPathUTF8];
-    if (path.length == 0) {
-        NSLog(@"%s feed not started: test video path is empty", kMyVCamC1CPrefix);
-        return;
-    }
-    NSURL *fileURL = [NSURL fileURLWithPath:path isDirectory:NO];
-    [manager attachMediaFileURL:fileURL];
-    NSError *error = nil;
-    if (![manager startWithError:&error]) {
-        NSLog(@"%s feed not started path=%s error=%@", kMyVCamC1CPrefix, MyVCamManagerTestVideoPathUTF8, error);
-        return;
-    }
-    NSLog(@"%s feed started path=%s", kMyVCamC1CPrefix, MyVCamManagerTestVideoPathUTF8);
-}
-
-static void MyVCamC1C_SessionDidStop(void) {
-    [[MyVCamManager sharedManager] stop];
-    NSLog(@"%s capture session stopped the feed", kMyVCamC1CPrefix);
-}
-
 %hook AVCaptureVideoDataOutput
 
 - (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
@@ -264,12 +397,14 @@ static void MyVCamC1C_SessionDidStop(void) {
 %hook AVCaptureSession
 
 - (void)startRunning {
-    MyVCamC1C_SessionDidStart();
+    // Flags only. Preparing the file here used to block this thread and run
+    // AVAssetReader inside the capture startup.
+    MyVCamC1C_NoteSessionStarted();
     %orig;
 }
 
 - (void)stopRunning {
-    MyVCamC1C_SessionDidStop();
+    MyVCamC1C_NoteSessionStopped();
     %orig;
 }
 

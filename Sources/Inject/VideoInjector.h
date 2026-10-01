@@ -12,19 +12,21 @@
 //  and clears the flag. dealloc CFReleases it if stop did not.
 //
 //  copyLatestSampleBufferMatchingOrigin: reads that stored buffer. It
-//  returns a new caller-owned image sample buffer whose pixels come from
-//  _latest and whose presentation time and duration come from the origin
-//  buffer. It does not mutate either buffer. NULL means the caller should
-//  keep the origin buffer.
+//  returns a new caller-owned image sample buffer whose pixels are adapted
+//  to the origin image buffer's width, height, and pixel format (32BGRA,
+//  420f, or 420v) and whose presentation time and duration come from the
+//  origin buffer. It does not mutate either buffer. NULL means the caller
+//  should keep the origin buffer. A non-video origin is always NULL.
 //
 //  The caller borrows the pointer it passes in. The injector owns only the
 //  reference it CFRetains. This class does not install hooks, swizzle
 //  capture classes, or talk to mediaserverd.
 //
 //  LAYERING: do not import MediaReader, MyVCamFrameSource, MyVCamManager,
-//  or SampleBufferBuilder. The injector does not decode video and does not
-//  convert pixel formats. The read path duplicates the small CoreMedia
-//  create sequence instead of calling SampleBufferBuilder.
+//  or SampleBufferBuilder. The injector does not decode video. The read path
+//  duplicates the small CoreMedia create sequence instead of calling
+//  SampleBufferBuilder, and scales or converts only when building the buffer
+//  returned to the capture delegate.
 //
 //  Later reference (not ported in this phase): DiCoy AVFoundation hooks.
 //  EthanArbuckle mediaserverd / BWNodeOutput injection is explicitly deferred
@@ -69,18 +71,23 @@ typedef NS_ENUM(NSInteger, MyVCamVideoInjectorErrorCode) {
 - (void)stop;
 
 /// Caller owns the result (CF_RETURNS_RETAINED) and must CFRelease it.
-/// NULL when origin is NULL, when no latest buffer is stored, when that
-/// buffer has no image buffer, when the origin presentation time is not
-/// numeric, or when a new sample buffer cannot be built.
+/// NULL when origin is NULL or invalid, when origin is not a video image
+/// buffer, when no latest buffer is stored, when the origin presentation
+/// time is not numeric, when the origin pixel format is not 32BGRA / 420f /
+/// 420v, or when a matching sample buffer cannot be built. NULL tells the
+/// caller to keep the origin buffer. Audio buffers are not replaced.
 /// Does not mutate origin or the stored latest buffer, and does not change
 /// prepare / inject / stop.
 ///
-/// The result is a new image sample buffer. Its pixel buffer is the one
-/// already inside the latest sample. Its presentation time and duration are
-/// copied from origin (output time, then presentation time; output duration,
-/// then duration). A non-positive or non-numeric duration becomes 1/30 second.
-/// decodeTimeStamp is kCMTimeInvalid. Attachments are not copied and the
-/// pixel format is not converted.
+/// The result is a new IOSurface-backed image sample buffer. Its dimensions
+/// and pixel format match origin. Its pixels are the latest frame, scaled
+/// and converted when the stored frame is 32BGRA of a different size or
+/// format. Its presentation time and duration are copied from origin (output
+/// time, then presentation time; output duration, then duration). A
+/// non-positive or non-numeric duration becomes 1/30 second.
+/// decodeTimeStamp is kCMTimeInvalid. The sample-attachment array is created
+/// and kCMSampleAttachmentKey_DisplayImmediately is set. Arbitrary origin
+/// sample-buffer attachments are not aliased into the result.
 /// The injector lock is taken only to CFRetain the stored buffer.
 - (CMSampleBufferRef _Nullable)copyLatestSampleBufferMatchingOrigin:(CMSampleBufferRef)origin
     CF_RETURNS_RETAINED;

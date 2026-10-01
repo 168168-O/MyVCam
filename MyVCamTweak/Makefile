@@ -30,6 +30,6 @@ MyVCamTweak_CFLAGS = -fobjc-arc \
 	-I$(SRC)/Buffer \
 	-I$(SRC)/Inject
 
-MyVCamTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo
+MyVCamTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo Accelerate
 
 include $(THEOS_MAKE_PATH)/tweak.mk

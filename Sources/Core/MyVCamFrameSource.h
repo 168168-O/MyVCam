@@ -48,6 +48,20 @@ NS_ASSUME_NONNULL_BEGIN
 /// Drop prepared state. Safe to call more than once. Does not inject.
 - (void)reset;
 
+@optional
+
+/// Same open as -prepareWithError:. When the open is published, *epochOut is
+/// that publication. 0 means nothing was published. A caller that does not
+/// keep the publication calls -invalidatePublishedEpoch: so a late open cannot
+/// stay running. Sources that do not implement this pair use -prepareWithError:
+/// and -reset only.
+- (BOOL)prepareWithError:(NSError * _Nullable * _Nullable)error
+          publishedEpoch:(uint64_t * _Nullable)epochOut;
+
+/// Drops the publication identified by epoch if it is still the current one.
+/// A newer prepare or reset makes this a no-op. epoch 0 does nothing.
+- (void)invalidatePublishedEpoch:(uint64_t)epoch;
+
 @end
 
 NS_ASSUME_NONNULL_END
