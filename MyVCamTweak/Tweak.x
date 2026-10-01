@@ -252,7 +252,7 @@ static void MyVCamC1B_LogPathOnce(BOOL replaced) {
     } else {
         NSLog(@"%s pass-through original sampleBuffer", kMyVCamC1BPrefix);
     }
-    NSLog(@"%s hook hit replaced=%d", kMyVCamDiagPrefix, replaced ? 1 : 0);
+    NSLog(@"%s sample replaced yes=%d", kMyVCamDiagPrefix, replaced ? 1 : 0);
 }
 
 static BOOL MyVCamC1B_OriginIsVideoImage(CMSampleBufferRef sampleBuffer) {
@@ -1030,7 +1030,7 @@ static void MyVCamC1A_Deliver(id self,
 static void MyVCamC1A_DidOutput(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
     static dispatch_once_t hookOnce;
     dispatch_once(&hookOnce, ^{
-        NSLog(@"%s hook hit", kMyVCamDiagPrefix);
+        NSLog(@"%s hook hit yes=1", kMyVCamDiagPrefix);
     });
     if (self == nil) {
         return;
@@ -1397,7 +1397,7 @@ static void MyVCamPreview_LogOverlay(BOOL ok, UIView *host, UIView *overlay) {
         return;
     }
     lastState = state;
-    NSLog(@"%s overlay create ok=%d view=%@ layer=%@ added_to=%@ in_window=%d hierarchy=%d",
+    NSLog(@"%s overlay create=%d view=%@ layer=%@ added_to=%@ in_window=%d hierarchy=%d",
           kMyVCamDiagPrefix,
           ok ? 1 : 0,
           overlay != nil ? NSStringFromClass(overlay.class) : @"-",
@@ -1843,6 +1843,7 @@ static void MyVCamPreview_Stop(void) {
     MyVCamC1A_InitState();
     dispatch_async(dispatch_get_main_queue(), ^{
         %init;
+        NSLog(@"%s init runs=1", kMyVCamDiagPrefix);
         NSLog(@"%s hooks installed", kMyVCamC1APrefix);
         MyVCamPreview_Start();
     });

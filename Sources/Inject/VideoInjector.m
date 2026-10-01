@@ -413,6 +413,13 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
     }
 }
 
+static void MyVCamLogInjectorSample(BOOL received) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSLog(@"[MyVCam 0.2.9] VideoInjector CMSampleBuffer yes=%d", received ? 1 : 0);
+    });
+}
+
 @implementation VideoInjector {
     os_unfair_lock _lock;
     BOOL _prepared;
@@ -454,6 +461,7 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
     os_unfair_lock_lock(&_lock);
     if (!_prepared) {
         os_unfair_lock_unlock(&_lock);
+        MyVCamLogInjectorSample(NO);
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamVideoInjectorErrorCodeNotPrepared
                               description:@"VideoInjector is not prepared. Call prepareWithError: before injectSampleBuffer:error:."];
@@ -463,6 +471,7 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
 
     if (sampleBuffer == NULL) {
         os_unfair_lock_unlock(&_lock);
+        MyVCamLogInjectorSample(NO);
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamVideoInjectorErrorCodeInvalidSampleBuffer
                               description:@"injectSampleBuffer:error: requires a non-NULL CMSampleBuffer."];
@@ -480,10 +489,7 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
     _latest = sampleBuffer;
     os_unfair_lock_unlock(&_lock);
 
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSLog(@"[MyVCam 0.2.9] VideoInjector got CMSampleBuffer");
-    });
+    MyVCamLogInjectorSample(YES);
 
     if (error != NULL) {
         *error = nil;

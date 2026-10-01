@@ -261,15 +261,7 @@ static int remember_container(const char *dir) {
 }
 
 static void find_camera_container(void) {
-    // com.apple.camera is an application. Its data container is under
-    // Data/Application. Data/System is mediaserverd and the other daemons;
-    // searching only there left container=- and never wrote the file Camera
-    // can open without a jbroot extension.
     static const char *roots[] = {
-        "/var/mobile/Containers/Data/Application",
-        "/private/var/mobile/Containers/Data/Application",
-        "/var/containers/Data/Application",
-        "/private/var/containers/Data/Application",
         "/var/containers/Data/System",
         "/private/var/containers/Data/System",
         "/var/mobile/Containers/Data/System",
@@ -406,7 +398,7 @@ static void write_status(uid_t uid,
         long long destSize = destExists ? (long long)destInfo.st_size : 0;
         int reported = copyErrno != 0 ? copyErrno : sourceErrno;
         syslog(LOG_NOTICE,
-               "[MyVCam 0.2.9] source=%s dest=%s source_exists=%d dest_exists=%d dest_size=%lld copy_ok=%d errno=%d error_domain=NSPOSIXErrorDomain error_code=%d",
+               "[MyVCam 0.2.8] source=%s dest=%s source_exists=%d dest_exists=%d dest_size=%lld copy_ok=%d errno=%d error_domain=NSPOSIXErrorDomain error_code=%d",
                kSourceVideo,
                kDestVideo,
                sourceExists,

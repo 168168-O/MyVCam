@@ -131,9 +131,7 @@ typedef NS_ENUM(NSInteger, MyVCamManagerErrorCode) {
 /// the frame source is prepared again from the start of the file.
 /// VideoInjector keeps its latest buffer across that rewind. The first loop
 /// after a start is logged. A second end with no frame since the last open,
-/// or any other feed error, cancels the timer and stops. A reader error of
-/// TryAgain (NULL sample while AVAssetReader is still Reading) is not end
-/// of media and does not stop the timer.
+/// or any other feed error, cancels the timer and stops.
 - (BOOL)startWithError:(NSError * _Nullable * _Nullable)error;
 
 /// Cancels the feed timer, resets the frame source, stops VideoInjector,

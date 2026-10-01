@@ -290,8 +290,8 @@ jobs:
             echo "myvcam-mirror is missing the Camera container identifier" >&2
             exit 1
           fi
-          if ! grep -a -F '[MyVCam 0.2.9]' "${mirrors[0]}"; then
-            echo "myvcam-mirror is missing the 0.2.9 diagnostic prefix" >&2
+          if ! grep -a -F '[MyVCam 0.2.8]' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing the 0.2.8 diagnostic prefix" >&2
             exit 1
           fi
           if ! grep -a -q '<string>--watch</string>' "${mirror_plists[0]}"; then
