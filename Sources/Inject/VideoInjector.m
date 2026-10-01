@@ -112,6 +112,15 @@ static CVPixelBufferRef _Nullable MyVCamInjectorCreatePixelBuffer(size_t width,
     return buffer;
 }
 
+static BOOL MyVCamInjectorBufferHasAttachment(CVPixelBufferRef buffer, CFStringRef key) {
+    CFTypeRef value = CVBufferCopyAttachment(buffer, key, NULL);
+    if (value == NULL) {
+        return NO;
+    }
+    CFRelease(value);
+    return YES;
+}
+
 /// Camera rejects or crashes on a buffer whose YCbCr tags do not match the
 /// capture buffer it was about to use. Copy the origin tags when they exist.
 static void MyVCamInjectorApplyColorAttachments(CVPixelBufferRef origin, CVPixelBufferRef destination, OSType format) {
@@ -123,28 +132,30 @@ static void MyVCamInjectorApplyColorAttachments(CVPixelBufferRef origin, CVPixel
         kCVImageBufferChromaLocationBottomFieldKey,
     };
     for (size_t index = 0; index < sizeof(keys) / sizeof(keys[0]); index++) {
-        CFTypeRef value = CVBufferGetAttachment(origin, keys[index], NULL);
+        // CopyAttachment is the iOS 15 replacement for CVBufferGetAttachment.
+        CFTypeRef value = CVBufferCopyAttachment(origin, keys[index], NULL);
         if (value != NULL) {
             CVBufferSetAttachment(destination, keys[index], value, kCVAttachmentMode_ShouldPropagate);
+            CFRelease(value);
         }
     }
     if (format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange &&
         format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
         return;
     }
-    if (CVBufferGetAttachment(destination, kCVImageBufferYCbCrMatrixKey, NULL) == NULL) {
+    if (!MyVCamInjectorBufferHasAttachment(destination, kCVImageBufferYCbCrMatrixKey)) {
         CVBufferSetAttachment(destination,
                               kCVImageBufferYCbCrMatrixKey,
                               kCVImageBufferYCbCrMatrix_ITU_R_709_2,
                               kCVAttachmentMode_ShouldPropagate);
     }
-    if (CVBufferGetAttachment(destination, kCVImageBufferColorPrimariesKey, NULL) == NULL) {
+    if (!MyVCamInjectorBufferHasAttachment(destination, kCVImageBufferColorPrimariesKey)) {
         CVBufferSetAttachment(destination,
                               kCVImageBufferColorPrimariesKey,
                               kCVImageBufferColorPrimaries_ITU_R_709_2,
                               kCVAttachmentMode_ShouldPropagate);
     }
-    if (CVBufferGetAttachment(destination, kCVImageBufferTransferFunctionKey, NULL) == NULL) {
+    if (!MyVCamInjectorBufferHasAttachment(destination, kCVImageBufferTransferFunctionKey)) {
         CVBufferSetAttachment(destination,
                               kCVImageBufferTransferFunctionKey,
                               kCVImageBufferTransferFunction_ITU_R_709_2,
@@ -230,7 +241,7 @@ static BOOL MyVCamInjectorConvertBGRAToBiplanar(const vImage_Buffer *source,
     }
 
     vImage_ARGBToYpCbCr conversion;
-    vImage_Error generated = vImageConvert_ARGBToYpCbCr_GenerateConversion(&kvImage_ARGBToYpCbCrMatrix_ITU_R_709_2,
+    vImage_Error generated = vImageConvert_ARGBToYpCbCr_GenerateConversion(kvImage_ARGBToYpCbCrMatrix_ITU_R_709_2,
                                                                             &range,
                                                                             &conversion,
                                                                             kvImageARGB8888,
