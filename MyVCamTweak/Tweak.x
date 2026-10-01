@@ -55,6 +55,11 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <IOSurface/IOSurfaceRef.h>
+// The iPhoneOS SDK does not provide IOKit/IOReturn.h. IOSurfaceLock returns 0
+// on success, which is kIOReturnSuccess.
+#ifndef kIOReturnSuccess
+#define kIOReturnSuccess 0
+#endif
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
