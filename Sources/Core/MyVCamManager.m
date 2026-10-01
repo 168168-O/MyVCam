@@ -528,6 +528,7 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
     os_unfair_lock_unlock(&_stateLock);
     dispatch_resume(timer);
     NSLog(@"%s feed timer started at %d fps", kMyVCamC1CPrefix, kMyVCamFeedFramesPerSecond);
+    NSLog(@"[MyVCam 0.2.8] feed timer started fps=%d", kMyVCamFeedFramesPerSecond);
 }
 
 // Runs on com.myvcam.feed. Does not run on the capture delegate queue.
@@ -546,6 +547,18 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
             _fedFrameSinceRewind = YES;
         }
         os_unfair_lock_unlock(&_stateLock);
+        static uint32_t injected = 0;
+        static CFAbsoluteTime windowStart = 0;
+        injected += 1;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (windowStart == 0) {
+            windowStart = now;
+        }
+        if (now - windowStart >= 1.0) {
+            NSLog(@"[MyVCam 0.2.8] injected frames/sec=%u", injected);
+            injected = 0;
+            windowStart = now;
+        }
         return;
     }
 

@@ -174,6 +174,18 @@ jobs:
             echo "merged dylib is missing the rootless mirror path" >&2
             exit 1
           fi
+          if ! grep -a -F 'mirror status' "$merged"; then
+            echo "merged dylib is missing the mirror status log" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'preview overlay attached' "$merged"; then
+            echo "merged dylib is missing the preview overlay log" >&2
+            exit 1
+          fi
+          if ! grep -a -F '[MyVCam 0.2.8]' "$merged"; then
+            echo "merged dylib is missing the 0.2.8 diagnostic prefix" >&2
+            exit 1
+          fi
           mkdir -p artifacts
           cp -v "$merged" artifacts/MyVCamTweak.dylib
 
@@ -213,8 +225,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.7' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.7" >&2
+          if ! grep -q '^Version: 0.2.8' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.8" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"
@@ -264,6 +276,30 @@ jobs:
           fi
           if [[ "$mirror_archs" =~ (^|[^[:alnum:]_])arm64e([^[:alnum:]_]|$) ]]; then
             echo "myvcam-mirror must not contain arm64e: ${mirror_archs}" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'mirror.status' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing mirror.status" >&2
+            exit 1
+          fi
+          if ! grep -a -F -- '--watch' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing --watch" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'com.apple.camera' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing the Camera container identifier" >&2
+            exit 1
+          fi
+          if ! grep -a -F '[MyVCam 0.2.8]' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing the 0.2.8 diagnostic prefix" >&2
+            exit 1
+          fi
+          if ! grep -a -q '<string>--watch</string>' "${mirror_plists[0]}"; then
+            echo "launch daemon is not KeepAlive --watch" >&2
+            exit 1
+          fi
+          if ! grep -a -q '<key>KeepAlive</key>' "${mirror_plists[0]}"; then
+            echo "launch daemon is missing KeepAlive" >&2
             exit 1
           fi
 

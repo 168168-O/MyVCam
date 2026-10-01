@@ -10,9 +10,10 @@
 			  C1-A/B/C run inside Camera only. One bundle.
 			  Exact bundle id. Does not match mediaserverd or SpringBoard.
 			  C1-C arms the manager feed after startRunning returns,
-			  unless a disable file exists or test.mp4 is not readable
-			  at the Documents path or the /var/jb mirror. The viewfinder
-			  overlay reads VideoInjector while that feed is running.
+			  unless a disable marker can be opened or test.mp4 cannot
+			  be opened in the container, the jbroot mirror, or Documents.
+			  The viewfinder overlay reads VideoInjector while that feed
+			  is running.
 			-->
 			<string>com.apple.camera</string>
 		</array>

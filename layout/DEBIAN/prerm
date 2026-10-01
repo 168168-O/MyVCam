@@ -1,6 +1,7 @@
 #!/bin/sh
 
 PLIST="/var/jb/Library/LaunchDaemons/com.myvcam.mirror.plist"
+RECORD="/var/jb/var/mobile/Library/MyVCam/container.path"
 LAUNCHCTL=""
 
 if [ -x /var/jb/usr/bin/launchctl ]; then
@@ -14,8 +15,25 @@ if [ -n "$LAUNCHCTL" ]; then
         "$LAUNCHCTL" unload "$PLIST" >/dev/null 2>&1 || true
 fi
 
+if [ -f "$RECORD" ]; then
+    CONTAINER=$(tr -d '\n' <"$RECORD" 2>/dev/null || true)
+    case "$CONTAINER" in
+        /var/containers/Data/System/*/Library/MyVCam/test.mp4|\
+        /private/var/containers/Data/System/*/Library/MyVCam/test.mp4|\
+        /var/mobile/Containers/Data/System/*/Library/MyVCam/test.mp4)
+            rm -f "$CONTAINER" "${CONTAINER}.tmp" \
+                "$(dirname "$CONTAINER")/disable" \
+                "$(dirname "$CONTAINER")/mirror.status"
+            ;;
+    esac
+fi
+
 rm -f /var/jb/var/mobile/Library/MyVCam/test.mp4 \
     /var/jb/var/mobile/Library/MyVCam/test.mp4.tmp \
-    /var/jb/var/mobile/Library/MyVCam/disable
+    /var/jb/var/mobile/Library/MyVCam/disable \
+    /var/jb/var/mobile/Library/MyVCam/mirror.status \
+    /var/jb/var/mobile/Library/MyVCam/mirror.lock \
+    /var/jb/var/mobile/Library/MyVCam/container.path \
+    /var/jb/var/mobile/Library/MyVCam/postinst.log
 
 exit 0

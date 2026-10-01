@@ -7,15 +7,14 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/var/jb/usr/bin/myvcam-mirror</string>
+		<string>--watch</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
-	<key>WatchPaths</key>
-	<array>
-		<string>/var/mobile/Documents/MyVCam</string>
-		<string>/var/mobile/Documents/MyVCam/test.mp4</string>
-		<string>/var/mobile/Documents/MyVCam/disable</string>
-	</array>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
 	<key>ThrottleInterval</key>
 	<integer>1</integer>
 </dict>

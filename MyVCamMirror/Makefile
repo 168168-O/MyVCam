@@ -1,10 +1,10 @@
 #
 # myvcam-mirror — root helper, not injected.
 #
-# com.apple.camera cannot read /var/mobile/Documents. Dopamine's check-in
-# extension covers /var/jb only. This tool is started by launchd as root,
-# outside Camera's sandbox, and copies test.mp4 (and the disable marker)
-# under /var/jb so the tweak can open them.
+# com.apple.camera cannot read /var/mobile/Documents. This tool is started
+# by launchd as root (--watch), outside Camera's sandbox. It copies test.mp4
+# under /var/jb and into Camera's data container, mode 0644, and writes
+# mirror.status (euid, mode, errno) so the tweak can log that it ran.
 #
 # arm64 only. A fat arm64e slice from this Linux toolchain is the wrong
 # pointer-auth ABI. An arm64 executable still runs on arm64e iOS.

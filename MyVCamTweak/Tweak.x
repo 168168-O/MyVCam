@@ -23,18 +23,22 @@
 //  C1-C: startRunning calls the original implementation, then, if the session
 //  is running, records that a session is up. The next turn on
 //  com.myvcam.enable attaches and starts the feed, unless a disable file is
-//  present or neither test.mp4 spelling is readable. Camera's sandbox cannot
-//  read /var/mobile/Documents. myvcam-mirror copies that file to
-//  /var/jb/var/mobile/Library/MyVCam/test.mp4, which the check-in extension
-//  allows. Delete the disable file and reopen Camera to re-enable. The
-//  manager still owns the 30 fps loop. A nested stopRunning inside
-//  startRunning does not clear that flag: Camera calls stop from inside
-//  start, and counting that as a real stop left the feed off while the
-//  session stayed up.
+//  present or no test.mp4 candidate can be opened. Camera's sandbox cannot
+//  read /var/mobile/Documents. myvcam-mirror (root, outside Camera) copies
+//  that file to /var/jb/var/mobile/Library/MyVCam/test.mp4 and to Camera's
+//  own data container. Readability is open(), not access(): Dopamine's
+//  extension is issued for the real jbroot path, and access() on the
+//  /var/jb symlink is the check that already rejected Documents. The enable
+//  queue keeps retrying while this session is current. A preview layer whose
+//  session is already running arms the same path if startRunning was missed.
+//  Delete the disable file and reopen Camera to re-enable. The manager still
+//  owns the 30 fps loop. A nested stopRunning inside startRunning does not
+//  clear the running flag.
 //  The feed is not gated on delegate callbacks. Camera's viewfinder is an
 //  AVCaptureVideoPreviewLayer, which never calls the video-data-output
-//  delegate. The display layer is the next sibling above that preview, not
-//  a sublayer of it. A sublayer is covered by the live preview surface.
+//  delegate. The display layer is a UIView inserted at the back of the
+//  preview's host view, so it covers the live image and stays under chrome.
+//  A loose sibling of the preview is what Photo mode kept painting over.
 //  Each enqueued frame is a new IOSurface-backed 32BGRA sample.
 //
 //  MyVCamTweak.plist matches com.apple.camera only. The dylib is arm64 only.
@@ -48,9 +52,12 @@
 #import <objc/runtime.h>
 #import <os/lock.h>
 #import <errno.h>
+#import <fcntl.h>
+#import <limits.h>
 #import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
+#import <sys/stat.h>
 #import <substrate.h>
 #import <unistd.h>
 #import "MyVCamManager.h"
@@ -79,11 +86,15 @@ static os_unfair_lock gLock = OS_UNFAIR_LOCK_INIT;
 static const char kMyVCamC1APrefix[] = "[MyVCam C1-A]";
 static const char kMyVCamC1BPrefix[] = "[MyVCam C1-B]";
 static const char kMyVCamC1CPrefix[] = "[MyVCam C1-C]";
+static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.8]";
 static const char kMyVCamDisablePath[] = "/var/mobile/Documents/MyVCam/disable";
-// Dopamine's process check-in grants read of /var/jb, not of Documents.
-// myvcam-mirror writes these. Camera can access() them.
+// Dopamine issues the sandbox extension for the real jbroot vnode
+// (JBROOT_PATH("/var/mobile")), not for the "/var/jb" symlink string.
+// myvcam-mirror writes the symlink path and Camera's container. open()
+// is the check; access() rejects paths this process can still open.
 static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/test.mp4";
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
+static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static NSString * const kMyVCamPreviewOverlayName = @"MyVCam.preview";
 #define kMyVCamHandoffCount 8
 static const int64_t kMyVCamMatchIntervalNanoseconds = (int64_t)(NSEC_PER_SEC / 30);
@@ -107,14 +118,17 @@ static dispatch_source_t gPreviewTimer;
 static BOOL gPreviewLogged = NO;
 static BOOL gPreviewEnqueueFailedLogged = NO;
 static BOOL gPreviewMissingLogged = NO;
+static int gPreviewEnqueueStreak = 0;
+static char kMyVCamOverlayAssociationKey;
+static char kMyVCamOpacityAssociationKey;
 static __thread int gMyVCamInDelegateHook;
 static int gMyVCamStartDepth = 0;
 static __thread int gMyVCamInStop;
 
 static void MyVCamC1B_MatchTick(uint64_t generation);
-static void MyVCamC1C_SessionDidStart(uint64_t generation);
+static BOOL MyVCamC1C_SessionDidStart(uint64_t generation);
 static void MyVCamC1C_ScheduleEnable(uint64_t generation);
-static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt);
+static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt, int prepareFailures);
 static void MyVCamPreview_Start(void);
 static void MyVCamPreview_Stop(void);
 
@@ -232,6 +246,7 @@ static void MyVCamC1B_LogPathOnce(BOOL replaced) {
     } else {
         NSLog(@"%s pass-through original sampleBuffer", kMyVCamC1BPrefix);
     }
+    NSLog(@"%s hook hit replaced=%d", kMyVCamDiagPrefix, replaced ? 1 : 0);
 }
 
 static BOOL MyVCamC1B_OriginIsVideoImage(CMSampleBufferRef sampleBuffer) {
@@ -468,46 +483,264 @@ static void MyVCamC1B_MatchTick(uint64_t generation) {
     });
 }
 
-static BOOL MyVCamC1C_DisableFilePresent(void) {
-    // F_OK on the Documents path is EPERM inside Camera even when the file
-    // exists. The mirror marker is the one this process can see.
-    if (access(kMyVCamDisablePath, F_OK) == 0) {
-        return YES;
+static BOOL MyVCamC1C_CopyLibraryPath(const char *leaf, char *buffer, size_t size) {
+    if (buffer == NULL || size == 0 || leaf == NULL) {
+        return NO;
     }
-    if (access(kMyVCamMirrorDisablePath, F_OK) == 0) {
-        return YES;
+    buffer[0] = '\0';
+    NSArray<NSString *> *libraries = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,
+                                                                          NSUserDomainMask,
+                                                                          YES);
+    NSString *library = libraries.firstObject;
+    if (library.length == 0) {
+        NSString *home = NSHomeDirectory();
+        if (home.length == 0) {
+            return NO;
+        }
+        library = [home stringByAppendingPathComponent:@"Library"];
+    }
+    NSString *path = [library stringByAppendingPathComponent:[NSString stringWithUTF8String:leaf]];
+    return [path getFileSystemRepresentation:buffer maxLength:size];
+}
+
+static BOOL MyVCamC1C_CopyRealJBPath(const char *linkPath, const char *suffix, char *buffer, size_t size) {
+    char root[PATH_MAX];
+    ssize_t length = 0;
+    int wrote = 0;
+
+    if (buffer == NULL || size == 0 || linkPath == NULL || suffix == NULL) {
+        return NO;
+    }
+    buffer[0] = '\0';
+    length = readlink(linkPath, root, sizeof(root) - 1);
+    if (length <= 0 || (size_t)length >= sizeof(root)) {
+        return NO;
+    }
+    root[length] = '\0';
+    if (root[0] != '/') {
+        return NO;
+    }
+    wrote = snprintf(buffer, size, "%s%s", root, suffix);
+    return wrote > 0 && (size_t)wrote < size;
+}
+
+/// Non-empty regular file. access() is not used: inside Camera it returns
+/// EPERM for Documents and can do the same for the /var/jb symlink even when
+/// open() of the real jbroot path succeeds.
+static BOOL MyVCamC1C_OpenRegular(const char *path, int *outErrno) {
+    int fd = -1;
+    struct stat info;
+    int statOK = 0;
+
+    memset(&info, 0, sizeof(info));
+
+    if (path == NULL || path[0] == '\0') {
+        return NO;
+    }
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        if (outErrno != NULL && errno != 0) {
+            *outErrno = errno;
+        }
+        return NO;
+    }
+    statOK = fstat(fd, &info) == 0;
+    if (!statOK && outErrno != NULL) {
+        *outErrno = errno;
+    }
+    close(fd);
+    if (!statOK || !S_ISREG(info.st_mode) || info.st_size <= 0) {
+        if (outErrno != NULL && *outErrno == 0) {
+            *outErrno = EINVAL;
+        }
+        return NO;
+    }
+    if (outErrno != NULL) {
+        *outErrno = 0;
+    }
+    return YES;
+}
+
+static void MyVCamC1C_ReadStatus(char *buffer, size_t size) {
+    char libraryStatus[PATH_MAX];
+    char realStatus[PATH_MAX];
+    const char *paths[4];
+    int count = 0;
+
+    if (buffer == NULL || size == 0) {
+        return;
+    }
+    buffer[0] = '\0';
+    if (MyVCamC1C_CopyLibraryPath("MyVCam/mirror.status", libraryStatus, sizeof(libraryStatus))) {
+        paths[count++] = libraryStatus;
+    }
+    paths[count++] = kMyVCamMirrorStatusPath;
+    if (MyVCamC1C_CopyRealJBPath("/var/jb", "/var/mobile/Library/MyVCam/mirror.status", realStatus, sizeof(realStatus)) ||
+        MyVCamC1C_CopyRealJBPath("/private/var/jb", "/var/mobile/Library/MyVCam/mirror.status", realStatus, sizeof(realStatus))) {
+        paths[count++] = realStatus;
+    }
+    for (int index = 0; index < count; index++) {
+        int fd = open(paths[index], O_RDONLY);
+        ssize_t countRead = 0;
+        if (fd < 0) {
+            continue;
+        }
+        countRead = read(fd, buffer, size - 1);
+        close(fd);
+        if (countRead < 0) {
+            buffer[0] = '\0';
+            continue;
+        }
+        buffer[countRead] = '\0';
+        for (ssize_t cursor = 0; cursor < countRead; cursor++) {
+            if (buffer[cursor] == '\n' || buffer[cursor] == '\r') {
+                buffer[cursor] = '\0';
+                break;
+            }
+        }
+        if (buffer[0] != '\0') {
+            return;
+        }
+    }
+}
+
+static void MyVCamC1C_ContainerFromStatus(const char *status, char *buffer, size_t size) {
+    const char *marker = NULL;
+    size_t length = 0;
+
+    if (buffer == NULL || size == 0) {
+        return;
+    }
+    buffer[0] = '\0';
+    if (status == NULL) {
+        return;
+    }
+    marker = strstr(status, "container=");
+    if (marker == NULL) {
+        return;
+    }
+    marker += strlen("container=");
+    if (marker[0] != '/') {
+        return;
+    }
+    while (marker[length] != '\0' && marker[length] != ' ' && marker[length] != '\n') {
+        length++;
+    }
+    if (length == 0 || length >= size) {
+        return;
+    }
+    memcpy(buffer, marker, length);
+    buffer[length] = '\0';
+}
+
+/// Empty regular file still counts. The disable marker is created with no body.
+static BOOL MyVCamC1C_OpenMarker(const char *path) {
+    int fd = -1;
+    struct stat info;
+    BOOL marker = NO;
+
+    if (path == NULL || path[0] == '\0') {
+        return NO;
+    }
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return NO;
+    }
+    marker = fstat(fd, &info) == 0 && S_ISREG(info.st_mode);
+    close(fd);
+    return marker;
+}
+
+static BOOL MyVCamC1C_DisableFilePresent(void) {
+    char libraryDisable[PATH_MAX];
+    char realDisable[PATH_MAX];
+    char status[1024];
+    char containerVideo[PATH_MAX];
+    char containerDisable[PATH_MAX];
+    const char *candidates[6];
+    int count = 0;
+
+    // A marker counts only when this process can open it. EPERM on Documents
+    // is not a disable file.
+    if (MyVCamC1C_CopyLibraryPath("MyVCam/disable", libraryDisable, sizeof(libraryDisable))) {
+        candidates[count++] = libraryDisable;
+    }
+    if (MyVCamC1C_CopyRealJBPath("/var/jb", "/var/mobile/Library/MyVCam/disable", realDisable, sizeof(realDisable))) {
+        candidates[count++] = realDisable;
+    }
+    candidates[count++] = kMyVCamMirrorDisablePath;
+    candidates[count++] = "/private/var/jb/var/mobile/Library/MyVCam/disable";
+    candidates[count++] = kMyVCamDisablePath;
+    MyVCamC1C_ReadStatus(status, sizeof(status));
+    MyVCamC1C_ContainerFromStatus(status, containerVideo, sizeof(containerVideo));
+    if (containerVideo[0] == '/') {
+        NSString *video = [NSString stringWithUTF8String:containerVideo];
+        NSString *disable = [[video stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"disable"];
+        if ([disable getFileSystemRepresentation:containerDisable maxLength:sizeof(containerDisable)]) {
+            candidates[count++] = containerDisable;
+        }
+    }
+    for (int index = 0; index < count; index++) {
+        if (MyVCamC1C_OpenMarker(candidates[index])) {
+            return YES;
+        }
     }
     return NO;
 }
 
-/// Documents path, its `/private` spelling, then the rootless mirror.
-/// `/var` is `/private/var`. The Documents constant stays in the binary.
-/// Camera's sandbox denies Documents, so the mirror is the path that opens.
+/// Container library, real jbroot path, /var/jb symlink, then Documents.
+/// The Documents constant stays in the binary. The path that opens is the
+/// one attach uses.
 static const char *MyVCamC1C_ReadableVideoPath(int *outErrno) {
-    static char aliasPath[160];
-    const char *primary = MyVCamManagerTestVideoPathUTF8;
-    const char *candidates[3];
+    static char chosen[PATH_MAX];
+    char libraryVideo[PATH_MAX];
+    char realVideo[PATH_MAX];
+    char privateVideo[PATH_MAX];
+    char status[1024];
+    char containerVideo[PATH_MAX];
+    char documentsPrivate[PATH_MAX];
+    const char *candidates[8];
     int count = 0;
     int savedErrno = 0;
+    const char *primary = MyVCamManagerTestVideoPathUTF8;
 
-    if (primary != NULL) {
-        candidates[count++] = primary;
+    if (MyVCamC1C_CopyLibraryPath("MyVCam/test.mp4", libraryVideo, sizeof(libraryVideo))) {
+        candidates[count++] = libraryVideo;
     }
-    int wrote = snprintf(aliasPath, sizeof(aliasPath), "/private%s", primary != NULL ? primary : "");
-    if (wrote > 0 && (size_t)wrote < sizeof(aliasPath)) {
-        candidates[count++] = aliasPath;
+    if (MyVCamC1C_CopyRealJBPath("/var/jb", "/var/mobile/Library/MyVCam/test.mp4", realVideo, sizeof(realVideo)) ||
+        MyVCamC1C_CopyRealJBPath("/private/var/jb", "/var/mobile/Library/MyVCam/test.mp4", realVideo, sizeof(realVideo))) {
+        candidates[count++] = realVideo;
     }
     candidates[count++] = kMyVCamMirrorVideoPath;
+    if (snprintf(privateVideo, sizeof(privateVideo), "/private%s", kMyVCamMirrorVideoPath) > 0) {
+        candidates[count++] = privateVideo;
+    }
+    MyVCamC1C_ReadStatus(status, sizeof(status));
+    MyVCamC1C_ContainerFromStatus(status, containerVideo, sizeof(containerVideo));
+    if (containerVideo[0] == '/') {
+        candidates[count++] = containerVideo;
+    }
+    if (primary != NULL) {
+        candidates[count++] = primary;
+        if (snprintf(documentsPrivate, sizeof(documentsPrivate), "/private%s", primary) > 0) {
+            candidates[count++] = documentsPrivate;
+        }
+    }
 
     for (int index = 0; index < count; index++) {
-        if (candidates[index] != NULL && access(candidates[index], R_OK) == 0) {
+        int candidateErrno = 0;
+        if (MyVCamC1C_OpenRegular(candidates[index], &candidateErrno)) {
+            if (strlen(candidates[index]) >= sizeof(chosen)) {
+                continue;
+            }
+            memcpy(chosen, candidates[index], strlen(candidates[index]) + 1);
             if (outErrno != NULL) {
                 *outErrno = 0;
             }
-            return candidates[index];
+            return chosen;
         }
-        if (errno != 0) {
-            savedErrno = errno;
+        if (candidateErrno != 0) {
+            savedErrno = candidateErrno;
         }
     }
     if (outErrno != NULL) {
@@ -516,11 +749,11 @@ static const char *MyVCamC1C_ReadableVideoPath(int *outErrno) {
     return NULL;
 }
 
-static void MyVCamC1C_SessionDidStart(uint64_t generation) {
+static BOOL MyVCamC1C_SessionDidStart(uint64_t generation) {
     // Runs on com.myvcam.enable, off the capture delegate queue and off
     // -startRunning. A missing file returns NO and does not arm the timer.
     if (!MyVCamC1C_GenerationIsCurrent(generation)) {
-        return;
+        return NO;
     }
 
     int videoErrno = 0;
@@ -531,13 +764,13 @@ static void MyVCamC1C_SessionDidStart(uint64_t generation) {
               MyVCamManagerTestVideoPathUTF8,
               kMyVCamMirrorVideoPath,
               videoErrno);
-        return;
+        return NO;
     }
     MyVCamManager *manager = [MyVCamManager sharedManager];
     NSString *path = [NSString stringWithUTF8String:readable];
     if (path.length == 0) {
         NSLog(@"%s feed not started: test video path is empty", kMyVCamC1CPrefix);
-        return;
+        return NO;
     }
     NSURL *fileURL = [NSURL fileURLWithPath:path isDirectory:NO];
     [manager attachMediaFileURL:fileURL];
@@ -546,11 +779,11 @@ static void MyVCamC1C_SessionDidStart(uint64_t generation) {
     if (!MyVCamC1C_GenerationIsCurrent(generation)) {
         [manager stop];
         NSLog(@"%s feed not started: capture session ended during prepare", kMyVCamC1CPrefix);
-        return;
+        return NO;
     }
     if (!started) {
         NSLog(@"%s feed not started path=%s error=%@", kMyVCamC1CPrefix, readable, error);
-        return;
+        return NO;
     }
     os_unfair_lock_lock(&gLock);
     if (gCaptureSessionRunning && gSessionGeneration == generation) {
@@ -562,6 +795,7 @@ static void MyVCamC1C_SessionDidStart(uint64_t generation) {
         MyVCamC1B_MatchTick(generation);
     });
     MyVCamPreview_Start();
+    return YES;
 }
 
 static void MyVCamC1C_NoteSessionStarted(void) {
@@ -597,9 +831,84 @@ static void MyVCamC1C_NoteSessionStopped(void) {
     MyVCamPreview_Stop();
 }
 
-static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt) {
+static void MyVCamC1C_LogFileProbe(const char *role, const char *path) {
+    NSString *nsPath = path != NULL ? [NSString stringWithUTF8String:path] : nil;
+    NSError *error = nil;
+    NSDictionary *attrs = nil;
+    if (nsPath.length > 0) {
+        attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:nsPath error:&error];
+    }
+    unsigned long long size = 0;
+    if (attrs != nil) {
+        size = [attrs fileSize];
+    }
+    NSLog(@"%s %s path=%s exists=%d size=%llu error_domain=%@ error_code=%ld",
+          kMyVCamDiagPrefix,
+          role != NULL ? role : "file",
+          path != NULL ? path : "(null)",
+          attrs != nil ? 1 : 0,
+          size,
+          error.domain ?: @"-",
+          (long)(error != nil ? error.code : 0));
+}
+
+static void MyVCamC1C_LogCopyDiagnostics(const char *status) {
+    int copied = 0;
+    int copyErrno = 0;
+    int sawCopied = 0;
+    if (status != NULL) {
+        const char *copiedKey = strstr(status, "copied=");
+        const char *errnoKey = strstr(status, "copy_errno=");
+        if (copiedKey != NULL) {
+            copied = atoi(copiedKey + strlen("copied="));
+            sawCopied = 1;
+        }
+        if (errnoKey != NULL) {
+            copyErrno = atoi(errnoKey + strlen("copy_errno="));
+        }
+    }
+    // The helper is C and reports POSIX errno. NSPOSIXErrorDomain is that
+    // code's Foundation domain so the device log has domain and code.
+    NSLog(@"%s copy success=%d error_domain=%@ error_code=%d status_present=%d",
+          kMyVCamDiagPrefix,
+          (sawCopied && copied != 0) ? 1 : 0,
+          @"NSPOSIXErrorDomain",
+          copyErrno,
+          status != NULL && status[0] != '\0' ? 1 : 0);
+}
+
+static void MyVCamC1C_LogMirrorStatus(int attempt, int videoErrno) {
+    char status[1024];
+    char libraryVideo[PATH_MAX];
+    if (attempt != 0 && (attempt % 10) != 0) {
+        return;
+    }
+    MyVCamC1C_ReadStatus(status, sizeof(status));
+    libraryVideo[0] = '\0';
+    MyVCamC1C_CopyLibraryPath("MyVCam/test.mp4", libraryVideo, sizeof(libraryVideo));
+    MyVCamC1C_LogFileProbe("source", MyVCamManagerTestVideoPathUTF8);
+    MyVCamC1C_LogFileProbe("dest", kMyVCamMirrorVideoPath);
+    MyVCamC1C_LogCopyDiagnostics(status);
+    if (status[0] == '\0') {
+        NSLog(@"%s mirror status unreadable errno=%d library=%s",
+              kMyVCamC1CPrefix,
+              videoErrno,
+              libraryVideo);
+        return;
+    }
+    NSLog(@"%s mirror status %s library=%s errno=%d",
+          kMyVCamC1CPrefix,
+          status,
+          libraryVideo,
+          videoErrno);
+}
+
+static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt, int prepareFailures) {
     // Runs on com.myvcam.enable. Not gated on capture callbacks: the
     // viewfinder does not deliver those, so a callback counter never ends.
+    // A miss does not stop this session. 0.2.7 gave up after four seconds
+    // and later startRunning calls did not schedule enable again.
+    @autoreleasepool {
     if (!MyVCamC1C_GenerationIsCurrent(generation)) {
         return;
     }
@@ -617,26 +926,17 @@ static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt) {
 
     int videoErrno = 0;
     if (MyVCamC1C_ReadableVideoPath(&videoErrno) == NULL) {
-        // The mirror is written by launchd after the file appears. Give it a
-        // few seconds on this same session before leaving the preview live.
-        if (attempt < 8) {
-            if (attempt == 0) {
-                NSLog(@"%s feed waiting for test video path=%s mirror=%s errno=%d",
-                      kMyVCamC1CPrefix,
-                      MyVCamManagerTestVideoPathUTF8,
-                      kMyVCamMirrorVideoPath,
-                      videoErrno);
-            }
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 2)), gEnableQueue, ^{
-                MyVCamC1C_EnableOnQueue(generation, attempt + 1);
-            });
-            return;
+        MyVCamC1C_LogMirrorStatus(attempt, videoErrno);
+        if (attempt == 0) {
+            NSLog(@"%s feed waiting for test video path=%s mirror=%s errno=%d",
+                  kMyVCamC1CPrefix,
+                  MyVCamManagerTestVideoPathUTF8,
+                  kMyVCamMirrorVideoPath,
+                  videoErrno);
         }
-        NSLog(@"%s feed not started: test video not readable path=%s mirror=%s errno=%d",
-              kMyVCamC1CPrefix,
-              MyVCamManagerTestVideoPathUTF8,
-              kMyVCamMirrorVideoPath,
-              videoErrno);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC), gEnableQueue, ^{
+            MyVCamC1C_EnableOnQueue(generation, attempt + 1, prepareFailures);
+        });
         return;
     }
 
@@ -646,14 +946,25 @@ static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt) {
     if (!current) {
         return;
     }
-    NSLog(@"%s passthrough warmup finished (session up)", kMyVCamC1CPrefix);
-    MyVCamC1C_SessionDidStart(generation);
+    if (prepareFailures == 0) {
+        MyVCamC1C_LogMirrorStatus(0, 0);
+        NSLog(@"%s passthrough warmup finished (session up)", kMyVCamC1CPrefix);
+    }
+    if (!MyVCamC1C_SessionDidStart(generation)) {
+        if (prepareFailures < 8) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC), gEnableQueue, ^{
+                MyVCamC1C_EnableOnQueue(generation, attempt, prepareFailures + 1);
+            });
+        }
+        return;
+    }
+    }
 }
 
 static void MyVCamC1C_ScheduleEnable(uint64_t generation) {
     // Next turn, off -startRunning.
     dispatch_async(gEnableQueue, ^{
-        MyVCamC1C_EnableOnQueue(generation, 0);
+        MyVCamC1C_EnableOnQueue(generation, 0, 0);
     });
 }
 
@@ -711,6 +1022,10 @@ static void MyVCamC1A_Deliver(id self,
 }
 
 static void MyVCamC1A_DidOutput(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
+    static dispatch_once_t hookOnce;
+    dispatch_once(&hookOnce, ^{
+        NSLog(@"%s hook hit", kMyVCamDiagPrefix);
+    });
     if (self == nil) {
         return;
     }
@@ -884,6 +1199,11 @@ static void MyVCamPreview_Track(AVCaptureVideoPreviewLayer *layer) {
             gPreviewLayers = [NSHashTable weakObjectsHashTable];
         }
         [gPreviewLayers addObject:layer];
+        // Photo mode can publish the preview after startRunning, or the
+        // session can already be running if the hook was installed late.
+        if (layer.session.isRunning) {
+            MyVCamC1C_NoteSessionStarted();
+        }
     });
 }
 
@@ -940,66 +1260,46 @@ static void MyVCamPreview_ScanWindows(void) {
     }
 }
 
-static AVSampleBufferDisplayLayer *MyVCamPreview_FindOverlay(NSArray<CALayer *> *sublayers) {
-    for (CALayer *sublayer in sublayers) {
-        if ([sublayer.name isEqualToString:kMyVCamPreviewOverlayName] &&
-            [sublayer isKindOfClass:[AVSampleBufferDisplayLayer class]]) {
-            return (AVSampleBufferDisplayLayer *)sublayer;
+/// Host view for the imported frames. A loose CALayer sibling stays under
+/// Photo mode's live preview surface. A subview at index 0 is above that
+/// surface and under shutter / focus views added later.
+@interface MyVCamPreviewHostView : UIView
+@end
+
+@implementation MyVCamPreviewHostView
++ (Class)layerClass {
+    return [AVSampleBufferDisplayLayer class];
+}
+@end
+
+static UIView *MyVCamPreview_HostView(AVCaptureVideoPreviewLayer *preview, BOOL *previewIsHostLayer) {
+    if (previewIsHostLayer != NULL) {
+        *previewIsHostLayer = NO;
+    }
+    id previewDelegate = preview.delegate;
+    if ([previewDelegate isKindOfClass:[UIView class]] &&
+        ((UIView *)previewDelegate).layer == (CALayer *)preview) {
+        if (previewIsHostLayer != NULL) {
+            *previewIsHostLayer = YES;
         }
+        return (UIView *)previewDelegate;
+    }
+    CALayer *superlayer = preview.superlayer;
+    id superDelegate = superlayer.delegate;
+    if ([superDelegate isKindOfClass:[UIView class]] &&
+        ((UIView *)superDelegate).layer == superlayer) {
+        return (UIView *)superDelegate;
     }
     return nil;
 }
 
-/// Sibling immediately above the preview. A sublayer of
-/// AVCaptureVideoPreviewLayer is painted under the live preview surface, so
-/// zPosition on that sublayer never covers the camera. Same zPosition as the
-/// preview keeps later chrome (shutter, focus) above this layer.
-static AVSampleBufferDisplayLayer *MyVCamPreview_Overlay(AVCaptureVideoPreviewLayer *preview, BOOL create) {
-    CALayer *host = preview.superlayer;
-    CGRect frame = preview.frame;
-    AVSampleBufferDisplayLayer *overlay = nil;
-    if (host != nil) {
-        overlay = MyVCamPreview_FindOverlay(host.sublayers);
+static void MyVCamPreview_RestoreOpacity(AVCaptureVideoPreviewLayer *preview) {
+    NSNumber *saved = objc_getAssociatedObject(preview, &kMyVCamOpacityAssociationKey);
+    if (saved == nil) {
+        return;
     }
-    if (overlay == nil) {
-        overlay = MyVCamPreview_FindOverlay(preview.sublayers);
-    }
-    BOOL placed = host != nil && !CGRectIsEmpty(frame);
-    if (overlay != nil) {
-        if (placed) {
-            overlay.frame = frame;
-            overlay.zPosition = preview.zPosition;
-            overlay.hidden = NO;
-            overlay.opacity = 1.0;
-            NSArray<CALayer *> *sublayers = host.sublayers;
-            NSUInteger overlayIndex = [sublayers indexOfObject:overlay];
-            NSUInteger previewIndex = [sublayers indexOfObject:preview];
-            if (overlay.superlayer != host ||
-                overlayIndex == NSNotFound ||
-                previewIndex == NSNotFound ||
-                overlayIndex < previewIndex) {
-                [host insertSublayer:overlay above:preview];
-            }
-        }
-        return overlay;
-    }
-    if (!create || !placed) {
-        return nil;
-    }
-    overlay = [AVSampleBufferDisplayLayer layer];
-    overlay.name = kMyVCamPreviewOverlayName;
-    overlay.frame = frame;
-    overlay.videoGravity = AVLayerVideoGravityResizeAspectFill;
-    overlay.backgroundColor = [UIColor blackColor].CGColor;
-    overlay.opaque = YES;
-    overlay.masksToBounds = YES;
-    overlay.zPosition = preview.zPosition;
-    overlay.contentsScale = UIScreen.mainScreen.scale;
-    // No controlTimebase. Samples are marked display-immediately. A timebase
-    // left at zero drops frames whose presentation time has already moved on,
-    // which is what happened after a failed enqueue rebuilt the layer.
-    [host insertSublayer:overlay above:preview];
-    return overlay;
+    preview.opacity = saved.floatValue;
+    objc_setAssociatedObject(preview, &kMyVCamOpacityAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
 }
 
 static void MyVCamPreview_RemoveNamedSublayers(CALayer *layer) {
@@ -1008,17 +1308,124 @@ static void MyVCamPreview_RemoveNamedSublayers(CALayer *layer) {
     }
     NSArray<CALayer *> *sublayers = [layer.sublayers copy];
     for (CALayer *sublayer in sublayers) {
-        if ([sublayer.name isEqualToString:kMyVCamPreviewOverlayName]) {
+        if ([sublayer.name isEqualToString:kMyVCamPreviewOverlayName] &&
+            ![sublayer.delegate isKindOfClass:[UIView class]]) {
             [sublayer removeFromSuperlayer];
         }
     }
 }
 
+static void MyVCamPreview_DropOverlay(AVCaptureVideoPreviewLayer *preview) {
+    if (preview == nil) {
+        return;
+    }
+    MyVCamPreviewHostView *view = objc_getAssociatedObject(preview, &kMyVCamOverlayAssociationKey);
+    if ([view isKindOfClass:[MyVCamPreviewHostView class]]) {
+        [view removeFromSuperview];
+    }
+    objc_setAssociatedObject(preview, &kMyVCamOverlayAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    MyVCamPreview_RestoreOpacity(preview);
+    MyVCamPreview_RemoveNamedSublayers(preview);
+    MyVCamPreview_RemoveNamedSublayers(preview.superlayer);
+}
+
 static void MyVCamPreview_RemoveOverlays(void) {
     for (AVCaptureVideoPreviewLayer *preview in gPreviewLayers.allObjects) {
-        MyVCamPreview_RemoveNamedSublayers(preview);
-        MyVCamPreview_RemoveNamedSublayers(preview.superlayer);
+        MyVCamPreview_DropOverlay(preview);
     }
+    gPreviewEnqueueStreak = 0;
+}
+
+static void MyVCamPreview_LogOverlay(BOOL ok, UIView *host, UIView *overlay) {
+    static int lastState = -1;
+    BOOL inWindow = overlay != nil && overlay.window != nil;
+    BOOL inHierarchy = overlay != nil && (overlay.superview != nil || overlay.layer.superlayer != nil);
+    int state = ok ? (inWindow ? 2 : 1) : 0;
+    if (state == lastState) {
+        return;
+    }
+    lastState = state;
+    NSLog(@"%s overlay create ok=%d view=%@ layer=%@ added_to=%@ in_window=%d hierarchy=%d",
+          kMyVCamDiagPrefix,
+          ok ? 1 : 0,
+          overlay != nil ? NSStringFromClass(overlay.class) : @"-",
+          overlay != nil ? NSStringFromClass(overlay.layer.class) : @"-",
+          host != nil ? NSStringFromClass(host.class) : @"-",
+          inWindow ? 1 : 0,
+          inHierarchy ? 1 : 0);
+}
+
+/// UIView above the live image. When the preview is only a sublayer, its
+/// opacity is cleared while this view is in a window so the camera surface
+/// cannot paint over the imported frames. Chrome that is a later subview of
+/// the host stays above index 0.
+static AVSampleBufferDisplayLayer *MyVCamPreview_Overlay(AVCaptureVideoPreviewLayer *preview, BOOL create) {
+    static BOOL loggedHost = NO;
+    BOOL previewIsHostLayer = NO;
+    UIView *host = MyVCamPreview_HostView(preview, &previewIsHostLayer);
+    MyVCamPreviewHostView *overlay = objc_getAssociatedObject(preview, &kMyVCamOverlayAssociationKey);
+    CGRect frame = CGRectZero;
+
+    if (![overlay isKindOfClass:[MyVCamPreviewHostView class]]) {
+        overlay = nil;
+    }
+    if (host != nil) {
+        if (previewIsHostLayer) {
+            frame = host.bounds;
+        } else if (preview.superlayer == host.layer) {
+            frame = preview.frame;
+        } else {
+            frame = [host.layer convertRect:preview.bounds fromLayer:preview];
+        }
+    }
+    if (overlay == nil) {
+        if (!create || host == nil || CGRectIsEmpty(frame)) {
+            if (create) {
+                MyVCamPreview_LogOverlay(NO, host, nil);
+            }
+            return nil;
+        }
+        overlay = [[MyVCamPreviewHostView alloc] initWithFrame:frame];
+        overlay.userInteractionEnabled = NO;
+        overlay.backgroundColor = [UIColor blackColor];
+        overlay.opaque = YES;
+        overlay.clipsToBounds = YES;
+        overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        overlay.layer.name = kMyVCamPreviewOverlayName;
+        AVSampleBufferDisplayLayer *display = (AVSampleBufferDisplayLayer *)overlay.layer;
+        display.videoGravity = AVLayerVideoGravityResizeAspectFill;
+        display.backgroundColor = [UIColor blackColor].CGColor;
+        display.contentsScale = UIScreen.mainScreen.scale;
+        objc_setAssociatedObject(preview,
+                                 &kMyVCamOverlayAssociationKey,
+                                 overlay,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (host == nil || CGRectIsEmpty(frame)) {
+        MyVCamPreview_LogOverlay(NO, host, overlay);
+        return nil;
+    }
+    overlay.frame = frame;
+    overlay.hidden = NO;
+    overlay.alpha = 1.0;
+    if (overlay.superview != host || [host.subviews indexOfObject:overlay] != 0) {
+        [host insertSubview:overlay atIndex:0];
+    }
+    if (!previewIsHostLayer && overlay.window != nil) {
+        if (objc_getAssociatedObject(preview, &kMyVCamOpacityAssociationKey) == nil) {
+            objc_setAssociatedObject(preview,
+                                     &kMyVCamOpacityAssociationKey,
+                                     @(preview.opacity),
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        preview.opacity = 0;
+    }
+    if (!loggedHost) {
+        loggedHost = YES;
+        NSLog(@"%s preview overlay attached host=%@", kMyVCamC1CPrefix, NSStringFromClass(host.class));
+    }
+    MyVCamPreview_LogOverlay(YES, host, overlay);
+    return (AVSampleBufferDisplayLayer *)overlay.layer;
 }
 
 static CVPixelBufferRef MyVCamPreview_CreateIOSurfaceBGRA(size_t width, size_t height) {
@@ -1154,6 +1561,22 @@ static BOOL MyVCamPreview_SessionIsLive(void) {
     return live;
 }
 
+static void MyVCamPreview_ArmIfNeeded(void) {
+    BOOL shouldArm = NO;
+    os_unfair_lock_lock(&gLock);
+    shouldArm = !gCaptureSessionRunning && gPhase != MyVCamPhaseDisabled;
+    os_unfair_lock_unlock(&gLock);
+    if (!shouldArm || gPreviewLayers == nil) {
+        return;
+    }
+    for (AVCaptureVideoPreviewLayer *preview in gPreviewLayers.allObjects) {
+        if (preview.session.isRunning) {
+            MyVCamC1C_NoteSessionStarted();
+            return;
+        }
+    }
+}
+
 static void MyVCamPreview_Tick(void) {
     static uint32_t scanTick = 0;
     scanTick += 1;
@@ -1161,6 +1584,7 @@ static void MyVCamPreview_Tick(void) {
     if (noLayers || (scanTick % 15u) == 1u) {
         MyVCamPreview_ScanWindows();
     }
+    MyVCamPreview_ArmIfNeeded();
     if (!MyVCamPreview_SessionIsLive()) {
         MyVCamPreview_RemoveOverlays();
         return;
@@ -1174,9 +1598,8 @@ static void MyVCamPreview_Tick(void) {
     }
     VideoInjector *injector = [[MyVCamManager sharedManager] videoInjector];
     CMSampleBufferRef latest = injector != nil ? [injector copyLatestSampleBuffer] : NULL;
-    if (latest == NULL) {
-        return;
-    }
+    // Attach the covering view even before the first decoded frame so Photo
+    // mode does not keep the live surface on top while the reader starts.
     BOOL enqueued = NO;
     for (AVCaptureVideoPreviewLayer *preview in gPreviewLayers.allObjects) {
         // A session that exists and is stopped is not the viewfinder. A layer
@@ -1186,7 +1609,7 @@ static void MyVCamPreview_Tick(void) {
             continue;
         }
         AVSampleBufferDisplayLayer *overlay = MyVCamPreview_Overlay(preview, YES);
-        if (overlay == nil) {
+        if (overlay == nil || latest == NULL) {
             continue;
         }
         if (!overlay.isReadyForMoreMediaData) {
@@ -1203,19 +1626,29 @@ static void MyVCamPreview_Tick(void) {
             [overlay enqueueSampleBuffer:stamped];
         }
         if (overlay.status == AVQueuedSampleBufferRenderingStatusFailed) {
-            // Keep the layer. Removing it on the first failure is what left
+            // Keep the view. Removing it on the first failure is what left
             // the live preview uncovered. flush and the next tick retry.
+            // A layer that stays failed is rebuilt so Photo mode does not
+            // sit on a dead AVSampleBufferDisplayLayer.
+            gPreviewEnqueueStreak += 1;
             if (!gPreviewEnqueueFailedLogged) {
                 gPreviewEnqueueFailedLogged = YES;
                 NSLog(@"%s preview enqueue failed: %@", kMyVCamC1CPrefix, overlay.error);
             }
             [overlay flush];
+            if (gPreviewEnqueueStreak >= 30) {
+                gPreviewEnqueueStreak = 0;
+                MyVCamPreview_DropOverlay(preview);
+            }
         } else {
+            gPreviewEnqueueStreak = 0;
             enqueued = YES;
         }
         CFRelease(stamped);
     }
-    CFRelease(latest);
+    if (latest != NULL) {
+        CFRelease(latest);
+    }
     if (enqueued && !gPreviewLogged) {
         gPreviewLogged = YES;
         NSLog(@"%s preview showing imported video", kMyVCamC1CPrefix);
@@ -1249,13 +1682,12 @@ static void MyVCamPreview_Start(void) {
 
 static void MyVCamPreview_Stop(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (gPreviewTimer != nil) {
-            dispatch_source_cancel(gPreviewTimer);
-            gPreviewTimer = nil;
-        }
+        // Leave the timer. The next session may already be running by the
+        // time startRunning's hook can see it; the tick arms that session.
         gPreviewLogged = NO;
         gPreviewEnqueueFailedLogged = NO;
         gPreviewMissingLogged = NO;
+        gPreviewEnqueueStreak = 0;
         MyVCamPreview_RemoveOverlays();
     });
 }
@@ -1303,5 +1735,6 @@ static void MyVCamPreview_Stop(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         %init;
         NSLog(@"%s hooks installed", kMyVCamC1APrefix);
+        MyVCamPreview_Start();
     });
 }

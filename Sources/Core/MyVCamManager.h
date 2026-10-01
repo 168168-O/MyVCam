@@ -50,7 +50,7 @@ extern NSString * const MyVCamManagerErrorDomain;
 
 /// UTF-8 bytes of the fixed C1-C test video:
 /// `/var/mobile/Documents/MyVCam/test.mp4`
-/// Not packaged. The tweak attaches this path when a capture session starts.
+/// Not packaged. The tweak may open this path or a mirror of it.
 /// A missing file makes -startWithError: return NO and does not arm the feed.
 extern const char MyVCamManagerTestVideoPathUTF8[];
 
