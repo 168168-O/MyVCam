@@ -1,0 +1,21 @@
+#!/bin/sh
+
+PLIST="/var/jb/Library/LaunchDaemons/com.myvcam.mirror.plist"
+LAUNCHCTL=""
+
+if [ -x /var/jb/usr/bin/launchctl ]; then
+    LAUNCHCTL="/var/jb/usr/bin/launchctl"
+elif [ -x /var/jb/bin/launchctl ]; then
+    LAUNCHCTL="/var/jb/bin/launchctl"
+fi
+
+if [ -n "$LAUNCHCTL" ]; then
+    "$LAUNCHCTL" bootout system/com.myvcam.mirror >/dev/null 2>&1 || \
+        "$LAUNCHCTL" unload "$PLIST" >/dev/null 2>&1 || true
+fi
+
+rm -f /var/jb/var/mobile/Library/MyVCam/test.mp4 \
+    /var/jb/var/mobile/Library/MyVCam/test.mp4.tmp \
+    /var/jb/var/mobile/Library/MyVCam/disable
+
+exit 0

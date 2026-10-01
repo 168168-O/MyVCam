@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.myvcam.mirror</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/bin/myvcam-mirror</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>WatchPaths</key>
+	<array>
+		<string>/var/mobile/Documents/MyVCam</string>
+		<string>/var/mobile/Documents/MyVCam/test.mp4</string>
+		<string>/var/mobile/Documents/MyVCam/disable</string>
+	</array>
+	<key>ThrottleInterval</key>
+	<integer>1</integer>
+</dict>
+</plist>
