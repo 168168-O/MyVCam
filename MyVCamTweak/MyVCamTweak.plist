@@ -17,6 +17,15 @@
 			-->
 			<string>com.apple.camera</string>
 		</array>
+		<key>Executables</key>
+		<array>
+			<!--
+			  Camera.app's executable name. ElleKit loads the tweak when
+			  either Bundles or Executables matches, so this still hits
+			  Camera if com.apple.camera is not registered yet.
+			-->
+			<string>Camera</string>
+		</array>
 	</dict>
 </dict>
 </plist>
