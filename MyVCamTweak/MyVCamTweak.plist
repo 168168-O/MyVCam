@@ -8,7 +8,9 @@
 		<array>
 			<!--
 			  C1-A/B/C run inside Camera only. One bundle.
-			  C1-C arms the manager feed after the first video sample.
+			  Exact bundle id. Does not match mediaserverd or SpringBoard.
+			  C1-C arms the manager feed after 30 passthrough callbacks,
+			  unless /var/mobile/Documents/MyVCam/disable exists.
 			-->
 			<string>com.apple.camera</string>
 		</array>

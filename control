@@ -1,6 +1,6 @@
 Package: com.myvcam.tweak
 Name: MyVCam
-Version: 0.2.4
+Version: 0.2.5
 Architecture: iphoneos-arm64
 Description: Camera feed loop from a fixed local video into the capture delegate. No mediaserverd injection.
 Maintainer: MyVCam Project

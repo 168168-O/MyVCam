@@ -86,8 +86,9 @@ typedef NS_ENUM(NSInteger, MyVCamVideoInjectorErrorCode) {
 /// time, then presentation time; output duration, then duration). A
 /// non-positive or non-numeric duration becomes 1/30 second.
 /// decodeTimeStamp is kCMTimeInvalid. The sample-attachment array is created
-/// and kCMSampleAttachmentKey_DisplayImmediately is set. Arbitrary origin
-/// sample-buffer attachments are not aliased into the result.
+/// and kCMSampleAttachmentKey_DisplayImmediately is set. The origin camera
+/// intrinsic matrix is copied when it is a CFData. Other origin attachments
+/// are not aliased into the result.
 /// The injector lock is taken only to CFRetain the stored buffer.
 - (CMSampleBufferRef _Nullable)copyLatestSampleBufferMatchingOrigin:(CMSampleBufferRef)origin
     CF_RETURNS_RETAINED;
