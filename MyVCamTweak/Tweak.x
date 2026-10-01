@@ -37,16 +37,18 @@
 //  The feed is not gated on delegate callbacks. Camera's viewfinder is an
 //  AVCaptureVideoPreviewLayer, which never calls the video-data-output
 //  delegate, so the C1-B hook cannot change what Photo mode shows.
-//  CAMVideoPreviewView keeps that layer as a sublayer of previewLayerView
-//  and layout moves it to the front of that view. A subview of
-//  previewLayerView, including one inserted at index 0, stays under the
-//  live image. The display view is the next sibling above previewLayerView,
-//  in that view's superview, which is the same place the shutter chrome
-//  already covers the preview from. While the cover is up, that host's
-//  alpha stays 0, the preview layer opacity stays 0, and its connection is
-//  disabled. Layout of the host's superview runs the placement again so a
-//  later layout cannot put the live view back in front.
-//  Each enqueued frame is a new IOSurface-backed 32BGRA sample.
+//  Photo mode keeps that layer as a sublayer of previewLayerView. The
+//  shutter and top bar are not siblings of previewLayerView; they share a
+//  higher superview with the whole preview branch. A cover inserted next to
+//  previewLayerView stays under the preview's video context, and that
+//  context ignores the host view's alpha and the layer's opacity. The cover
+//  is inserted in the chrome's superview, immediately above the preview
+//  branch, which is the slot that already paints over the camera. While the
+//  cover is attached, the preview layer is forced hidden, its opacity stays
+//  0, and its connection is disabled. Layout of that superview runs the
+//  placement again. The cover is retained outside the superview so a layout
+//  that removes unknown subviews does not drop it or restore the live image.
+//  Each enqueued frame is an IOSurface-backed 32BGRA sample.
 //
 //  MyVCamTweak.plist matches com.apple.camera only. The dylib is arm64 only.
 //
@@ -94,7 +96,7 @@ static os_unfair_lock gLock = OS_UNFAIR_LOCK_INIT;
 static const char kMyVCamC1APrefix[] = "[MyVCam C1-A]";
 static const char kMyVCamC1BPrefix[] = "[MyVCam C1-B]";
 static const char kMyVCamC1CPrefix[] = "[MyVCam C1-C]";
-static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.10]";
+static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.11]";
 static const char kMyVCamDisablePath[] = "/var/mobile/Documents/MyVCam/disable";
 // Dopamine issues the sandbox extension for the real jbroot vnode
 // (JBROOT_PATH("/var/mobile")), not for the "/var/jb" symlink string.
@@ -133,8 +135,13 @@ static char kMyVCamConnectionAssociationKey;
 static char kMyVCamCoverAnchorKey;
 static char kMyVCamCoverPreviewKey;
 static char kMyVCamCoverContainerKey;
+static char kMyVCamCoverHostKey;
 static char kMyVCamHostAlphaKey;
+static char kMyVCamHiddenAssociationKey;
+static NSMutableSet *gPreviewCovers;
 static __thread int gMyVCamInCoverLayout;
+static __thread int gMyVCamRestoringPreview;
+static __thread int gMyVCamForcingLive;
 static __thread int gMyVCamInDelegateHook;
 static int gMyVCamStartDepth = 0;
 static __thread int gMyVCamInStop;
@@ -145,6 +152,7 @@ static void MyVCamC1C_ScheduleEnable(uint64_t generation);
 static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt, int prepareFailures);
 static void MyVCamPreview_Start(void);
 static void MyVCamPreview_Stop(void);
+static BOOL MyVCamPreview_SessionIsLive(void);
 
 static void MyVCamC1A_InitState(void) {
     static dispatch_once_t onceToken;
@@ -1288,21 +1296,10 @@ static void MyVCamPreview_RestoreOpacity(AVCaptureVideoPreviewLayer *preview);
     return [AVSampleBufferDisplayLayer class];
 }
 
-// Camera can drop an unknown subview while rebuilding the viewfinder.
-// The preview association is assign, so it has to be cleared before this
-// view goes away, and the host alpha has to come back if the cover is gone.
-- (void)willMoveToSuperview:(UIView *)newSuperview {
-    if (newSuperview == nil) {
-        AVCaptureVideoPreviewLayer *preview = objc_getAssociatedObject(self, &kMyVCamCoverPreviewKey);
-        MyVCamPreview_ClearCoverLinks((MyVCamPreviewHostView *)self);
-        if ([preview isKindOfClass:[AVCaptureVideoPreviewLayer class]] &&
-            objc_getAssociatedObject(preview, &kMyVCamOverlayAssociationKey) == self) {
-            MyVCamPreview_RestoreOpacity(preview);
-            objc_setAssociatedObject(preview, &kMyVCamOverlayAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
-        }
-    }
-    [super willMoveToSuperview:newSuperview];
-}
+// Removal from the superview is not the end of the cover. Photo mode's
+// layout drops subviews it does not own. willMoveToSuperview: used to
+// forget the cover and restore the live preview, which put the camera back
+// on screen. The cover stays in gPreviewCovers and the next tick reinserts it.
 @end
 
 /// View that owns this preview layer. Photo mode's CAMVideoPreviewView does
@@ -1337,24 +1334,36 @@ static UIView *MyVCamPreview_HostView(AVCaptureVideoPreviewLayer *preview, BOOL 
 }
 
 static void MyVCamPreview_RestoreOpacity(AVCaptureVideoPreviewLayer *preview) {
-    NSNumber *saved = objc_getAssociatedObject(preview, &kMyVCamOpacityAssociationKey);
-    if (saved != nil) {
-        preview.opacity = saved.floatValue;
-        objc_setAssociatedObject(preview, &kMyVCamOpacityAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
-    }
-    NSNumber *enabled = objc_getAssociatedObject(preview, &kMyVCamConnectionAssociationKey);
-    if (enabled == nil) {
-        return;
-    }
+    // Covering() treats a restore as not covered so setHidden:/setOpacity:
+    // write the saved values instead of forcing the live layer back off.
+    gMyVCamRestoringPreview = 1;
     @try {
-        AVCaptureConnection *connection = preview.connection;
-        if (connection != nil) {
-            connection.enabled = enabled.boolValue;
+        NSNumber *saved = objc_getAssociatedObject(preview, &kMyVCamOpacityAssociationKey);
+        if (saved != nil) {
+            preview.opacity = saved.floatValue;
+            objc_setAssociatedObject(preview, &kMyVCamOpacityAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
         }
-    } @catch (NSException *exception) {
-        NSLog(@"%s preview connection restore skipped: %@", kMyVCamC1CPrefix, exception);
+        NSNumber *hidden = objc_getAssociatedObject(preview, &kMyVCamHiddenAssociationKey);
+        if (hidden != nil) {
+            preview.hidden = hidden.boolValue;
+            objc_setAssociatedObject(preview, &kMyVCamHiddenAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        }
+        NSNumber *enabled = objc_getAssociatedObject(preview, &kMyVCamConnectionAssociationKey);
+        if (enabled == nil) {
+            return;
+        }
+        @try {
+            AVCaptureConnection *connection = preview.connection;
+            if (connection != nil) {
+                connection.enabled = enabled.boolValue;
+            }
+        } @catch (NSException *exception) {
+            NSLog(@"%s preview connection restore skipped: %@", kMyVCamC1CPrefix, exception);
+        }
+        objc_setAssociatedObject(preview, &kMyVCamConnectionAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    } @finally {
+        gMyVCamRestoringPreview = 0;
     }
-    objc_setAssociatedObject(preview, &kMyVCamConnectionAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
 }
 
 /// previewLayerView's alpha, not the preview layer's. The live image is a
@@ -1390,9 +1399,10 @@ static void MyVCamPreview_RestoreHost(UIView *host) {
 }
 
 /// Hide the live preview without hiding the cover. The cover is not a
-/// subview of this layer, so opacity 0 does not hide it. Disabling the
-/// preview connection stops Photo mode painting a new camera frame over
-/// that sibling when the compositor ignores opacity.
+/// subview of this layer. Host alpha and preview opacity do not stop Photo
+/// mode's video context, so the layer is also forced hidden. Disabling the
+/// preview connection stops a new camera frame from being issued to it.
+/// The photo output uses a different connection.
 static void MyVCamPreview_SuppressLive(AVCaptureVideoPreviewLayer *preview) {
     if (preview == nil) {
         return;
@@ -1403,7 +1413,18 @@ static void MyVCamPreview_SuppressLive(AVCaptureVideoPreviewLayer *preview) {
                                  @(preview.opacity),
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    preview.opacity = 0;
+    if (preview.opacity != 0.0f) {
+        preview.opacity = 0;
+    }
+    if (objc_getAssociatedObject(preview, &kMyVCamHiddenAssociationKey) == nil) {
+        objc_setAssociatedObject(preview,
+                                 &kMyVCamHiddenAssociationKey,
+                                 @(preview.hidden),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (!preview.hidden) {
+        preview.hidden = YES;
+    }
     @try {
         AVCaptureConnection *connection = preview.connection;
         if (connection == nil) {
@@ -1437,16 +1458,25 @@ static void MyVCamPreview_RemoveNamedSublayers(CALayer *layer) {
 }
 
 static void MyVCamPreview_ClearCoverLinks(MyVCamPreviewHostView *view) {
+    UIView *host = nil;
+    UIView *container = nil;
+
     if (![view isKindOfClass:[MyVCamPreviewHostView class]]) {
         return;
     }
-    UIView *anchor = objc_getAssociatedObject(view, &kMyVCamCoverAnchorKey);
-    UIView *container = view.superview;
+    host = objc_getAssociatedObject(view, &kMyVCamCoverHostKey);
+    container = view.superview;
     if (container != nil && objc_getAssociatedObject(container, &kMyVCamCoverContainerKey) == view) {
         objc_setAssociatedObject(container, &kMyVCamCoverContainerKey, nil, OBJC_ASSOCIATION_ASSIGN);
     }
-    MyVCamPreview_RestoreHost(anchor);
+    if (host != nil && host != container &&
+        objc_getAssociatedObject(host, &kMyVCamCoverContainerKey) == view) {
+        objc_setAssociatedObject(host, &kMyVCamCoverContainerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    }
+    // Alpha was applied to the immediate preview host, not the chrome sibling.
+    MyVCamPreview_RestoreHost(host);
     objc_setAssociatedObject(view, &kMyVCamCoverAnchorKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(view, &kMyVCamCoverHostKey, nil, OBJC_ASSOCIATION_ASSIGN);
     objc_setAssociatedObject(view, &kMyVCamCoverPreviewKey, nil, OBJC_ASSOCIATION_ASSIGN);
 }
 
@@ -1454,20 +1484,35 @@ static void MyVCamPreview_DropOverlay(AVCaptureVideoPreviewLayer *preview) {
     if (preview == nil) {
         return;
     }
+    // Clear the association before restore. setHidden:/setOpacity: force the
+    // live layer off while a cover is still associated.
     MyVCamPreviewHostView *view = objc_getAssociatedObject(preview, &kMyVCamOverlayAssociationKey);
+    objc_setAssociatedObject(preview, &kMyVCamOverlayAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
     if ([view isKindOfClass:[MyVCamPreviewHostView class]]) {
         MyVCamPreview_ClearCoverLinks(view);
+        [gPreviewCovers removeObject:view];
         [view removeFromSuperview];
     }
-    objc_setAssociatedObject(preview, &kMyVCamOverlayAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
     MyVCamPreview_RestoreOpacity(preview);
     MyVCamPreview_RemoveNamedSublayers(preview);
     MyVCamPreview_RemoveNamedSublayers(preview.superlayer);
 }
 
 static void MyVCamPreview_RemoveOverlays(void) {
+    NSArray *leftovers = nil;
+
     for (AVCaptureVideoPreviewLayer *preview in gPreviewLayers.allObjects) {
         MyVCamPreview_DropOverlay(preview);
+    }
+    leftovers = gPreviewCovers.allObjects;
+    for (MyVCamPreviewHostView *view in leftovers) {
+        AVCaptureVideoPreviewLayer *preview = objc_getAssociatedObject(view, &kMyVCamCoverPreviewKey);
+        if ([preview isKindOfClass:[AVCaptureVideoPreviewLayer class]]) {
+            MyVCamPreview_DropOverlay(preview);
+        } else {
+            [view removeFromSuperview];
+            [gPreviewCovers removeObject:view];
+        }
     }
     gPreviewEnqueueStreak = 0;
 }
@@ -1561,11 +1606,107 @@ static void MyVCamPreview_HookContainerLayout(UIView *container) {
     NSLog(@"%s preview layout hooked class=%@", kMyVCamC1CPrefix, NSStringFromClass(impl));
 }
 
-/// Keep the cover as the next sibling above the live host. Returns NO when
-/// the host is not in a superview yet. Called from the preview tick and from
-/// the host superview's layoutSubviews.
+/// Full-bleed siblings are more preview surface. Tiny siblings are reticles.
+/// Anything else (shutter, top bar, zoom, mode dial) is chrome: the cover
+/// has to be inserted under that chrome, not inside previewLayerView.
+static BOOL MyVCamPreview_SiblingIsChrome(UIView *sibling, UIView *parent) {
+    CGRect frame = CGRectZero;
+    CGRect bounds = CGRectZero;
+    CGFloat widthRatio = 0;
+    CGFloat heightRatio = 0;
+
+    if (sibling == nil || sibling.hidden || sibling.alpha <= 0.01f) {
+        return NO;
+    }
+    if ([sibling isKindOfClass:[MyVCamPreviewHostView class]]) {
+        return NO;
+    }
+    frame = sibling.frame;
+    bounds = parent.bounds;
+    if (CGRectGetWidth(bounds) < 1.0 || CGRectGetHeight(bounds) < 1.0) {
+        return NO;
+    }
+    widthRatio = CGRectGetWidth(frame) / CGRectGetWidth(bounds);
+    heightRatio = CGRectGetHeight(frame) / CGRectGetHeight(bounds);
+    if (widthRatio >= 0.75 && heightRatio >= 0.75) {
+        return NO;
+    }
+    if (widthRatio <= 0.35 && heightRatio <= 0.35) {
+        return NO;
+    }
+    return YES;
+}
+
+/// The view to insert the cover above, and the superview that also holds
+/// the chrome. Climbing stops at the first ancestor whose parent has chrome,
+/// and never above the window's root view (that would cover the shutter).
+static void MyVCamPreview_ChoosePlacement(UIView *host, UIView **outAbove, UIView **outContainer) {
+    UIView *branch = host;
+
+    if (outAbove != NULL) {
+        *outAbove = nil;
+    }
+    if (outContainer != NULL) {
+        *outContainer = nil;
+    }
+    if (host == nil) {
+        return;
+    }
+    while (branch.superview != nil && ![branch.superview isKindOfClass:[UIWindow class]]) {
+        UIView *parent = branch.superview;
+        BOOL parentIsRoot = parent.superview == nil || [parent.superview isKindOfClass:[UIWindow class]];
+        BOOL chrome = NO;
+
+        for (UIView *sibling in parent.subviews) {
+            if (sibling == branch) {
+                continue;
+            }
+            if (MyVCamPreview_SiblingIsChrome(sibling, parent)) {
+                chrome = YES;
+                break;
+            }
+        }
+        if (chrome || parentIsRoot) {
+            if (outAbove != NULL) {
+                *outAbove = branch;
+            }
+            if (outContainer != NULL) {
+                *outContainer = parent;
+            }
+            return;
+        }
+        branch = parent;
+    }
+    if (outAbove != NULL) {
+        *outAbove = host;
+    }
+    if (outContainer != NULL) {
+        *outContainer = host.superview;
+    }
+}
+
+/// YES while this preview's cover is on screen. setHidden: and setOpacity:
+/// use it to keep Camera from showing the live layer again. A restore in
+/// progress is not covering, so the saved values can be written back.
+static BOOL MyVCamPreview_Covering(AVCaptureVideoPreviewLayer *preview) {
+    MyVCamPreviewHostView *overlay = nil;
+
+    if (gMyVCamRestoringPreview || preview == nil || ![NSThread isMainThread]) {
+        return NO;
+    }
+    if (!MyVCamPreview_SessionIsLive()) {
+        return NO;
+    }
+    overlay = objc_getAssociatedObject(preview, &kMyVCamOverlayAssociationKey);
+    return [overlay isKindOfClass:[MyVCamPreviewHostView class]] && overlay.superview != nil && !overlay.hidden;
+}
+
+/// Keep the cover as the next sibling above the preview branch. Returns NO
+/// when that branch is not in a superview yet. Called from the preview tick
+/// and from the chrome superview's layoutSubviews.
 static BOOL MyVCamPreview_PlaceExisting(MyVCamPreviewHostView *overlay) {
     UIView *above = nil;
+    UIView *host = nil;
     AVCaptureVideoPreviewLayer *preview = nil;
     UIView *container = nil;
     UIView *previous = nil;
@@ -1580,6 +1721,7 @@ static BOOL MyVCamPreview_PlaceExisting(MyVCamPreviewHostView *overlay) {
     gMyVCamInCoverLayout = 1;
     @try {
         above = objc_getAssociatedObject(overlay, &kMyVCamCoverAnchorKey);
+        host = objc_getAssociatedObject(overlay, &kMyVCamCoverHostKey);
         preview = objc_getAssociatedObject(overlay, &kMyVCamCoverPreviewKey);
         if (![above isKindOfClass:[UIView class]] || above.superview == nil || CGRectIsEmpty(above.bounds)) {
             placed = NO;
@@ -1613,19 +1755,30 @@ static BOOL MyVCamPreview_PlaceExisting(MyVCamPreviewHostView *overlay) {
             if (overlay.superview != container || aboveIndex == NSNotFound || overlayIndex != aboveIndex + 1) {
                 [container insertSubview:overlay aboveSubview:above];
             }
-            if (preview != nil && overlay.layer.superlayer != nil &&
+            // Same superlayer as the live preview means the climb stopped
+            // inside the view Camera reorders. Stay above that layer.
+            if ([preview isKindOfClass:[AVCaptureVideoPreviewLayer class]] &&
+                overlay.layer.superlayer != nil &&
                 overlay.layer.superlayer == preview.superlayer) {
-                // Still inside the view Camera reorders. Stay above that layer.
                 overlay.layer.zPosition = preview.zPosition + 1.0;
             }
             objc_setAssociatedObject(container,
                                      &kMyVCamCoverContainerKey,
                                      overlay,
                                      OBJC_ASSOCIATION_ASSIGN);
+            if ([host isKindOfClass:[UIView class]] && host != container) {
+                objc_setAssociatedObject(host,
+                                         &kMyVCamCoverContainerKey,
+                                         overlay,
+                                         OBJC_ASSOCIATION_ASSIGN);
+                MyVCamPreview_HookContainerLayout(host);
+            }
             MyVCamPreview_HookContainerLayout(container);
             if ([preview isKindOfClass:[AVCaptureVideoPreviewLayer class]]) {
                 MyVCamPreview_SuppressLive(preview);
-                MyVCamPreview_SuppressHost(above, preview);
+                if ([host isKindOfClass:[UIView class]]) {
+                    MyVCamPreview_SuppressHost(host, preview);
+                }
             }
             placed = overlay.superview != nil;
         }
@@ -1635,38 +1788,102 @@ static BOOL MyVCamPreview_PlaceExisting(MyVCamPreviewHostView *overlay) {
     return placed;
 }
 
+static void MyVCamPreview_LogHost(UIView *host, BOOL hostLayer, UIView *above, UIView *container) {
+    static NSString *last = nil;
+    NSString *token = [NSString stringWithFormat:@"%@|%d|%@|%@",
+                       host != nil ? NSStringFromClass(host.class) : @"-",
+                       hostLayer ? 1 : 0,
+                       above != nil ? NSStringFromClass(above.class) : @"-",
+                       container != nil ? NSStringFromClass(container.class) : @"-"];
+    if (last != nil && [last isEqualToString:token]) {
+        return;
+    }
+    last = token;
+    NSLog(@"%s host found class=%@ host_layer=%d above=%@ container=%@ in_window=%d",
+          kMyVCamDiagPrefix,
+          host != nil ? NSStringFromClass(host.class) : @"-",
+          hostLayer ? 1 : 0,
+          above != nil ? NSStringFromClass(above.class) : @"-",
+          container != nil ? NSStringFromClass(container.class) : @"-",
+          (host.window != nil || above.window != nil) ? 1 : 0);
+}
+
+static void MyVCamPreview_LogCoverAttach(BOOL ok,
+                                         UIView *container,
+                                         UIView *above,
+                                         UIView *host,
+                                         UIView *overlay,
+                                         AVCaptureVideoPreviewLayer *preview) {
+    static int lastState = -1;
+    BOOL inWindow = overlay != nil && overlay.window != nil;
+    int state = ok ? (inWindow ? 2 : 1) : 0;
+    if (state == lastState) {
+        return;
+    }
+    lastState = state;
+    if (!ok) {
+        NSLog(@"%s cover attach failed container=%@ above=%@ host=%@",
+              kMyVCamDiagPrefix,
+              container != nil ? NSStringFromClass(container.class) : @"-",
+              above != nil ? NSStringFromClass(above.class) : @"-",
+              host != nil ? NSStringFromClass(host.class) : @"-");
+        return;
+    }
+    NSLog(@"%s cover attach container=%@ above=%@ host=%@ frame=%@ in_window=%d live_hidden=%d",
+          kMyVCamDiagPrefix,
+          container != nil ? NSStringFromClass(container.class) : @"-",
+          above != nil ? NSStringFromClass(above.class) : @"-",
+          host != nil ? NSStringFromClass(host.class) : @"-",
+          overlay != nil ? NSStringFromCGRect(overlay.frame) : @"-",
+          inWindow ? 1 : 0,
+          (preview != nil && preview.hidden) ? 1 : 0);
+}
+
 /// UIView above the live image.
 ///
-/// Photo mode does not make AVCaptureVideoPreviewLayer the backing layer of
-/// CAMPreviewView. CAMVideoPreviewView owns previewLayerView, and the live
-/// layer is a sublayer of that view. layoutSubviews calls addSublayer:, which
-/// moves the live layer to the front. 0.2.9 inserted the cover at index 0 of
-/// that host, so the camera stayed on screen. The cover is the next subview
-/// of the host's superview, above previewLayerView and under chrome that is
-/// already above the host. While the cover is attached, the host alpha stays
-/// 0 when the live layer is not the host's backing layer, and the preview
-/// opacity stays 0 and its connection is disabled.
+/// Photo mode keeps AVCaptureVideoPreviewLayer as a sublayer of
+/// previewLayerView. 0.2.10 inserted the cover as the next sibling of that
+/// host and set the host's alpha to 0. The shutter paints over the preview
+/// from a higher superview, and the preview's video context ignores ancestor
+/// alpha, so the camera stayed on screen. The cover is inserted in the
+/// chrome's superview, immediately above the preview branch. The preview
+/// layer is forced hidden while that cover is attached. The cover object is
+/// kept in gPreviewCovers, so a layout pass that removes it does not restore
+/// the live image.
 static AVSampleBufferDisplayLayer *MyVCamPreview_Overlay(AVCaptureVideoPreviewLayer *preview, BOOL create) {
     static BOOL loggedHost = NO;
     BOOL previewIsHostLayer = NO;
-    UIView *anchor = MyVCamPreview_HostView(preview, &previewIsHostLayer);
+    UIView *host = MyVCamPreview_HostView(preview, &previewIsHostLayer);
+    UIView *above = nil;
+    UIView *container = nil;
     MyVCamPreviewHostView *overlay = objc_getAssociatedObject(preview, &kMyVCamOverlayAssociationKey);
-    UIView *container = anchor.superview;
 
     if (![overlay isKindOfClass:[MyVCamPreviewHostView class]]) {
         overlay = nil;
     }
-    if (anchor == nil || container == nil || CGRectIsEmpty(anchor.bounds)) {
+    if (host == nil && overlay != nil) {
+        host = objc_getAssociatedObject(overlay, &kMyVCamCoverHostKey);
+    }
+    if (host != nil) {
+        MyVCamPreview_ChoosePlacement(host, &above, &container);
+    }
+    if (above == nil || container == nil || CGRectIsEmpty(above.bounds)) {
         if (create) {
-            MyVCamPreview_LogOverlay(NO, container != nil ? container : anchor, overlay);
+            MyVCamPreview_LogHost(host, previewIsHostLayer, above, container);
+            MyVCamPreview_LogCoverAttach(NO, container, above, host, overlay, preview);
+            MyVCamPreview_LogOverlay(NO, container != nil ? container : host, overlay);
         }
         return nil;
     }
+    MyVCamPreview_LogHost(host, previewIsHostLayer, above, container);
     if (overlay == nil) {
         if (!create) {
             return nil;
         }
-        overlay = [[MyVCamPreviewHostView alloc] initWithFrame:anchor.frame];
+        if (gPreviewCovers == nil) {
+            gPreviewCovers = [[NSMutableSet alloc] init];
+        }
+        overlay = [[MyVCamPreviewHostView alloc] initWithFrame:above.frame];
         overlay.userInteractionEnabled = NO;
         overlay.backgroundColor = [UIColor blackColor];
         overlay.opaque = YES;
@@ -1677,36 +1894,32 @@ static AVSampleBufferDisplayLayer *MyVCamPreview_Overlay(AVCaptureVideoPreviewLa
         display.videoGravity = AVLayerVideoGravityResizeAspectFill;
         display.backgroundColor = [UIColor blackColor].CGColor;
         display.contentsScale = UIScreen.mainScreen.scale;
-        // The cover retains the preview layer. The preview's association is
-        // assign: a retain there would cycle through the cover.
-        objc_setAssociatedObject(overlay, &kMyVCamCoverAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(overlay, &kMyVCamCoverPreviewKey, preview, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // gPreviewCovers retains the cover. The cover retains the preview
+        // layer. The preview's association is assign, so the two do not cycle.
+        [gPreviewCovers addObject:overlay];
         objc_setAssociatedObject(preview,
                                  &kMyVCamOverlayAssociationKey,
                                  overlay,
                                  OBJC_ASSOCIATION_ASSIGN);
-    } else {
-        objc_setAssociatedObject(overlay, &kMyVCamCoverAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(overlay, &kMyVCamCoverPreviewKey, preview, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    objc_setAssociatedObject(overlay, &kMyVCamCoverAnchorKey, above, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(overlay, &kMyVCamCoverHostKey, host, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(overlay, &kMyVCamCoverPreviewKey, preview, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!MyVCamPreview_PlaceExisting(overlay)) {
+        MyVCamPreview_LogCoverAttach(NO, container, above, host, overlay, preview);
         MyVCamPreview_LogOverlay(NO, container, overlay);
-        if (overlay.superview == nil &&
-            objc_getAssociatedObject(preview, &kMyVCamOverlayAssociationKey) == overlay) {
-            MyVCamPreview_ClearCoverLinks(overlay);
-            objc_setAssociatedObject(preview, &kMyVCamOverlayAssociationKey, nil, OBJC_ASSOCIATION_ASSIGN);
-        }
         return nil;
     }
     if (!loggedHost) {
         loggedHost = YES;
         NSLog(@"%s preview overlay attached host=%@ above=%@ container=%@ host_layer=%d",
               kMyVCamC1CPrefix,
-              NSStringFromClass(anchor.class),
-              NSStringFromClass(anchor.class),
+              host != nil ? NSStringFromClass(host.class) : @"-",
+              NSStringFromClass(above.class),
               NSStringFromClass(container.class),
               previewIsHostLayer ? 1 : 0);
     }
+    MyVCamPreview_LogCoverAttach(YES, container, above, host, overlay, preview);
     MyVCamPreview_LogOverlay(YES, container, overlay);
     return (AVSampleBufferDisplayLayer *)overlay.layer;
 }
@@ -1770,27 +1983,62 @@ static BOOL MyVCamPreview_CopyBGRA(CVPixelBufferRef source, CVPixelBufferRef des
 /// New IOSurface-backed 32BGRA sample (+1). AVSampleBufferDisplayLayer rejects
 /// a buffer that is not IOSurface-backed, and AVAssetReader does not promise
 /// one. DisplayImmediately so a control timebase is not required.
-static CMSampleBufferRef MyVCamPreview_CopyDisplaySample(CMSampleBufferRef source) {
+static CMSampleBufferRef MyVCamPreview_CopyDisplaySample(CMSampleBufferRef source, const char **outReason) {
     static int64_t tick = 0;
+    if (outReason != NULL) {
+        *outReason = "ok";
+    }
     if (source == NULL) {
+        if (outReason != NULL) {
+            *outReason = "latest";
+        }
         return NULL;
     }
     CVPixelBufferRef sourcePixels = CMSampleBufferGetImageBuffer(source);
-    if (sourcePixels == NULL ||
-        CVPixelBufferGetPixelFormatType(sourcePixels) != kCVPixelFormatType_32BGRA) {
+    if (sourcePixels == NULL) {
+        if (outReason != NULL) {
+            *outReason = "pixelbuffer";
+        }
+        return NULL;
+    }
+    OSType pixelFormat = CVPixelBufferGetPixelFormatType(sourcePixels);
+    if (pixelFormat != kCVPixelFormatType_32BGRA) {
+        if (outReason != NULL) {
+            *outReason = "format";
+        }
         return NULL;
     }
     size_t width = CVPixelBufferGetWidth(sourcePixels);
     size_t height = CVPixelBufferGetHeight(sourcePixels);
     if (width == 0 || height == 0) {
+        if (outReason != NULL) {
+            *outReason = "size";
+        }
         return NULL;
     }
-    CVPixelBufferRef pixels = MyVCamPreview_CreateIOSurfaceBGRA(width, height);
+    // MediaReader already asks for an IOSurface. Wrapping that buffer avoids
+    // a CPU copy that fails when the base address is not readable, which
+    // left the cover with nothing to enqueue.
+    CVPixelBufferRef pixels = NULL;
+    if (CVPixelBufferGetIOSurface(sourcePixels) != NULL) {
+        pixels = CVPixelBufferRetain(sourcePixels);
+    } else {
+        pixels = MyVCamPreview_CreateIOSurfaceBGRA(width, height);
+        if (pixels == NULL || !MyVCamPreview_CopyBGRA(sourcePixels, pixels)) {
+            BOOL created = pixels != NULL;
+            if (created) {
+                CVPixelBufferRelease(pixels);
+            }
+            if (outReason != NULL) {
+                *outReason = created ? "copy" : "iosurface";
+            }
+            return NULL;
+        }
+    }
     if (pixels == NULL) {
-        return NULL;
-    }
-    if (!MyVCamPreview_CopyBGRA(sourcePixels, pixels)) {
-        CVPixelBufferRelease(pixels);
+        if (outReason != NULL) {
+            *outReason = "iosurface";
+        }
         return NULL;
     }
 
@@ -1803,6 +2051,9 @@ static CMSampleBufferRef MyVCamPreview_CopyDisplaySample(CMSampleBufferRef sourc
             CFRelease(format);
         }
         CVPixelBufferRelease(pixels);
+        if (outReason != NULL) {
+            *outReason = "format_desc";
+        }
         return NULL;
     }
 
@@ -1823,6 +2074,9 @@ static CMSampleBufferRef MyVCamPreview_CopyDisplaySample(CMSampleBufferRef sourc
     if (sampleStatus != noErr || sample == NULL) {
         if (sample != NULL) {
             CFRelease(sample);
+        }
+        if (outReason != NULL) {
+            *outReason = "sample";
         }
         return NULL;
     }
@@ -1861,6 +2115,46 @@ static void MyVCamPreview_ArmIfNeeded(void) {
     }
 }
 
+static void MyVCamPreview_LogTimer(uint32_t scanTick, int latest) {
+    unsigned long layers = 0;
+    if (scanTick != 1u && (scanTick % 30u) != 0u) {
+        return;
+    }
+    layers = gPreviewLayers != nil ? gPreviewLayers.allObjects.count : 0;
+    NSLog(@"%s timer ticks preview=%u live=%d layers=%lu latest=%d",
+          kMyVCamDiagPrefix,
+          scanTick,
+          MyVCamPreview_SessionIsLive() ? 1 : 0,
+          layers,
+          latest);
+}
+
+static void MyVCamPreview_LogCoverFrame(BOOL success,
+                                        const char *reason,
+                                        size_t width,
+                                        size_t height,
+                                        NSInteger status) {
+    static int logged = 0;
+    if (success) {
+        if ((logged & 2) != 0) {
+            return;
+        }
+        logged |= 2;
+    } else {
+        if ((logged & 1) != 0) {
+            return;
+        }
+        logged |= 1;
+    }
+    NSLog(@"%s first frame to cover success=%d reason=%s width=%zu height=%zu status=%ld",
+          kMyVCamDiagPrefix,
+          success ? 1 : 0,
+          reason != NULL ? reason : "-",
+          width,
+          height,
+          (long)status);
+}
+
 static void MyVCamPreview_Tick(void) {
     static uint32_t scanTick = 0;
     scanTick += 1;
@@ -1870,10 +2164,12 @@ static void MyVCamPreview_Tick(void) {
     }
     MyVCamPreview_ArmIfNeeded();
     if (!MyVCamPreview_SessionIsLive()) {
+        MyVCamPreview_LogTimer(scanTick, -1);
         MyVCamPreview_RemoveOverlays();
         return;
     }
     if (gPreviewLayers == nil || gPreviewLayers.allObjects.count == 0) {
+        MyVCamPreview_LogTimer(scanTick, -1);
         if (!gPreviewMissingLogged && scanTick > 30u) {
             gPreviewMissingLogged = YES;
             NSLog(@"%s preview layer not in a window", kMyVCamC1CPrefix);
@@ -1882,6 +2178,7 @@ static void MyVCamPreview_Tick(void) {
     }
     VideoInjector *injector = [[MyVCamManager sharedManager] videoInjector];
     CMSampleBufferRef latest = injector != nil ? [injector copyLatestSampleBuffer] : NULL;
+    MyVCamPreview_LogTimer(scanTick, latest != NULL ? 1 : 0);
     // Attach the covering view even before the first decoded frame so Photo
     // mode does not keep the live surface on top while the reader starts.
     BOOL enqueued = NO;
@@ -1893,14 +2190,21 @@ static void MyVCamPreview_Tick(void) {
             continue;
         }
         AVSampleBufferDisplayLayer *overlay = MyVCamPreview_Overlay(preview, YES);
-        if (overlay == nil || latest == NULL) {
+        if (overlay == nil) {
+            continue;
+        }
+        if (latest == NULL) {
+            MyVCamPreview_LogCoverFrame(NO, "latest", 0, 0, overlay.status);
             continue;
         }
         if (!overlay.isReadyForMoreMediaData) {
+            MyVCamPreview_LogCoverFrame(NO, "not_ready", 0, 0, overlay.status);
             continue;
         }
-        CMSampleBufferRef stamped = MyVCamPreview_CopyDisplaySample(latest);
+        const char *reason = NULL;
+        CMSampleBufferRef stamped = MyVCamPreview_CopyDisplaySample(latest, &reason);
         if (stamped == NULL) {
+            MyVCamPreview_LogCoverFrame(NO, reason != NULL ? reason : "sample", 0, 0, overlay.status);
             continue;
         }
         if (overlay.status == AVQueuedSampleBufferRenderingStatusFailed) {
@@ -1910,23 +2214,31 @@ static void MyVCamPreview_Tick(void) {
             [overlay enqueueSampleBuffer:stamped];
         }
         if (overlay.status == AVQueuedSampleBufferRenderingStatusFailed) {
-            // Keep the view. Removing it on the first failure is what left
-            // the live preview uncovered. flush and the next tick retry.
-            // A layer that stays failed is rebuilt so Photo mode does not
-            // sit on a dead AVSampleBufferDisplayLayer.
+            // Keep the cover. Dropping it restored the live preview, which
+            // is what Photo mode was still showing. flush and the next tick
+            // retry; the layer stays in front of the camera either way.
             gPreviewEnqueueStreak += 1;
             if (!gPreviewEnqueueFailedLogged) {
                 gPreviewEnqueueFailedLogged = YES;
                 NSLog(@"%s preview enqueue failed: %@", kMyVCamC1CPrefix, overlay.error);
             }
+            MyVCamPreview_LogCoverFrame(NO, "enqueue",
+                                        CVPixelBufferGetWidth(CMSampleBufferGetImageBuffer(stamped)),
+                                        CVPixelBufferGetHeight(CMSampleBufferGetImageBuffer(stamped)),
+                                        overlay.status);
             [overlay flush];
             if (gPreviewEnqueueStreak >= 30) {
                 gPreviewEnqueueStreak = 0;
-                MyVCamPreview_DropOverlay(preview);
+                [overlay flushAndRemoveImage];
             }
         } else {
+            CVPixelBufferRef enqueuedPixels = CMSampleBufferGetImageBuffer(stamped);
             gPreviewEnqueueStreak = 0;
             enqueued = YES;
+            MyVCamPreview_LogCoverFrame(YES, "enqueued",
+                                        enqueuedPixels != NULL ? CVPixelBufferGetWidth(enqueuedPixels) : 0,
+                                        enqueuedPixels != NULL ? CVPixelBufferGetHeight(enqueuedPixels) : 0,
+                                        overlay.status);
         }
         CFRelease(stamped);
     }
@@ -2010,6 +2322,44 @@ static void MyVCamPreview_Stop(void) {
 - (void)setSessionWithNoConnection:(AVCaptureSession *)session {
     %orig;
     MyVCamPreview_Track((AVCaptureVideoPreviewLayer *)self);
+}
+
+- (void)setHidden:(BOOL)hidden {
+    AVCaptureVideoPreviewLayer *preview = (AVCaptureVideoPreviewLayer *)self;
+    if (!gMyVCamForcingLive && !gMyVCamRestoringPreview && MyVCamPreview_Covering(preview)) {
+        gMyVCamForcingLive = 1;
+        %orig(YES);
+        gMyVCamForcingLive = 0;
+        return;
+    }
+    %orig(hidden);
+}
+
+- (void)setOpacity:(float)opacity {
+    AVCaptureVideoPreviewLayer *preview = (AVCaptureVideoPreviewLayer *)self;
+    if (!gMyVCamForcingLive && !gMyVCamRestoringPreview && MyVCamPreview_Covering(preview)) {
+        gMyVCamForcingLive = 1;
+        %orig(0.0f);
+        gMyVCamForcingLive = 0;
+        return;
+    }
+    %orig(opacity);
+}
+
+- (void)layoutSublayers {
+    AVCaptureVideoPreviewLayer *preview = (AVCaptureVideoPreviewLayer *)self;
+    %orig;
+    if (gMyVCamForcingLive || gMyVCamRestoringPreview || !MyVCamPreview_Covering(preview)) {
+        return;
+    }
+    gMyVCamForcingLive = 1;
+    if (!preview.hidden) {
+        preview.hidden = YES;
+    }
+    if (preview.opacity != 0.0f) {
+        preview.opacity = 0.0f;
+    }
+    gMyVCamForcingLive = 0;
 }
 
 %end
