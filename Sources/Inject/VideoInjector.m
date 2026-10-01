@@ -482,7 +482,7 @@ static void MyVCamInjectorCopySafeAttachments(CMSampleBufferRef origin, CMSample
 
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSLog(@"[MyVCam 0.2.8] VideoInjector got CMSampleBuffer");
+        NSLog(@"[MyVCam 0.2.9] VideoInjector got CMSampleBuffer");
     });
 
     if (error != NULL) {

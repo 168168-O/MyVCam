@@ -31,31 +31,198 @@
 #import <AVFoundation/AVFoundation.h>
 #import <errno.h>
 #import <fcntl.h>
+#import <limits.h>
+#import <stdio.h>
 #import <string.h>
 #import <sys/stat.h>
+#import <time.h>
 #import <unistd.h>
 
-static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.8]";
+static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.9]";
 
-static void MyVCamMediaReaderLogOpen(NSURL *fileURL, BOOL openOK, int openErrno, NSError * _Nullable readerError) {
-    NSString *path = fileURL.path ?: @"";
+static void MyVCamMediaReaderLogOpen(NSURL *sourceURL,
+                                     NSURL *assetURL,
+                                     BOOL openOK,
+                                     int openErrno,
+                                     BOOL copied,
+                                     NSError * _Nullable readerError) {
+    NSString *sourcePath = sourceURL.path ?: @"";
+    NSString *assetPath = assetURL.path ?: @"";
     NSError *fileError = nil;
     NSDictionary *attrs = nil;
-    if (path.length > 0) {
-        attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:&fileError];
+    if (assetPath.length > 0) {
+        attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:assetPath error:&fileError];
     }
     unsigned long long size = attrs != nil ? [attrs fileSize] : 0;
     NSError *reported = readerError ?: fileError;
-    NSLog(@"%s MediaReader open success=%d path=%s url=%@ exists=%d size=%llu open_errno=%d error_domain=%@ error_code=%ld",
+    NSLog(@"%s MediaReader open success=%d path=%s asset=%s copied=%d exists=%d size=%llu open_errno=%d error_domain=%@ error_code=%ld",
           kMyVCamDiagPrefix,
           openOK ? 1 : 0,
-          path.UTF8String ?: "",
-          fileURL.absoluteString ?: @"",
+          sourcePath.UTF8String ?: "",
+          assetPath.UTF8String ?: "",
+          copied ? 1 : 0,
           attrs != nil ? 1 : 0,
           size,
           openErrno,
           reported.domain ?: @"-",
           (long)(reported != nil ? reported.code : 0));
+}
+
+/// AVAssetReader and VideoToolbox reopen the URL outside this process.
+/// Dopamine's jbroot extension covers Camera's open(), not that service.
+/// A file outside the container is copied, from the fd already opened, into
+/// Library/MyVCam/playback.mp4. Same size and mtime skips the copy.
+static BOOL MyVCamPathIsInsideHome(NSString *path) {
+    if (path.length == 0) {
+        return NO;
+    }
+    NSString *home = NSHomeDirectory();
+    if (home.length == 0) {
+        return NO;
+    }
+    NSString *prefix = [home hasSuffix:@"/"] ? home : [home stringByAppendingString:@"/"];
+    if ([path hasPrefix:prefix] || [path isEqualToString:home]) {
+        return YES;
+    }
+    if ([home hasPrefix:@"/private/"]) {
+        NSString *shortHome = [home substringFromIndex:8];
+        NSString *shortPrefix = [shortHome hasSuffix:@"/"] ? shortHome : [shortHome stringByAppendingString:@"/"];
+        return shortHome.length > 1 && ([path hasPrefix:shortPrefix] || [path isEqualToString:shortHome]);
+    }
+    NSString *privateHome = [@"/private" stringByAppendingString:home];
+    NSString *privatePrefix = [privateHome stringByAppendingString:@"/"];
+    return [path hasPrefix:privatePrefix] || [path isEqualToString:privateHome];
+}
+
+static BOOL MyVCamDestMatchesSource(const char *destination, const struct stat *sourceInfo) {
+    struct stat destInfo;
+    if (destination == NULL || sourceInfo == NULL) {
+        return NO;
+    }
+    if (stat(destination, &destInfo) != 0 || !S_ISREG(destInfo.st_mode)) {
+        return NO;
+    }
+    return destInfo.st_size == sourceInfo->st_size && destInfo.st_mtime == sourceInfo->st_mtime;
+}
+
+static int MyVCamCopyFDToPath(int sourceFD, const char *destination, const struct stat *sourceInfo) {
+    char temporary[PATH_MAX];
+    char buffer[1 << 16];
+    int output = -1;
+    int wrote = 0;
+    ssize_t count = 0;
+
+    if (sourceFD < 0 || destination == NULL || sourceInfo == NULL) {
+        return EINVAL;
+    }
+    if (MyVCamDestMatchesSource(destination, sourceInfo)) {
+        return 0;
+    }
+    wrote = snprintf(temporary, sizeof(temporary), "%s.tmp", destination);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(temporary)) {
+        return ENAMETOOLONG;
+    }
+    if (lseek(sourceFD, 0, SEEK_SET) < 0) {
+        return errno != 0 ? errno : EIO;
+    }
+    output = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (output < 0) {
+        return errno != 0 ? errno : EIO;
+    }
+    while ((count = read(sourceFD, buffer, sizeof(buffer))) > 0) {
+        ssize_t written = 0;
+        while (written < count) {
+            ssize_t step = write(output, buffer + written, (size_t)(count - written));
+            if (step < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                int writeErrno = errno != 0 ? errno : EIO;
+                close(output);
+                unlink(temporary);
+                return writeErrno;
+            }
+            written += step;
+        }
+    }
+    if (count < 0) {
+        int readErrno = errno != 0 ? errno : EIO;
+        close(output);
+        unlink(temporary);
+        return readErrno;
+    }
+    if (fsync(output) != 0) {
+        int syncErrno = errno != 0 ? errno : EIO;
+        close(output);
+        unlink(temporary);
+        return syncErrno;
+    }
+    struct timespec times[2];
+    memset(times, 0, sizeof(times));
+    times[0].tv_sec = sourceInfo->st_atime;
+    times[1].tv_sec = sourceInfo->st_mtime;
+    (void)futimens(output, times);
+    if (close(output) != 0) {
+        unlink(temporary);
+        return errno != 0 ? errno : EIO;
+    }
+    if (rename(temporary, destination) != 0) {
+        int renameErrno = errno != 0 ? errno : EIO;
+        unlink(temporary);
+        return renameErrno;
+    }
+    (void)chmod(destination, 0644);
+    return 0;
+}
+
+/// Container URL when source is outside Camera's home. On failure returns
+/// the original URL so prepare still attempts the path open() accepted.
+static NSURL *MyVCamDecodeURL(NSURL *fileURL, int sourceFD, const struct stat *sourceInfo, BOOL *copiedOut, int *errnoOut) {
+    NSString *path = fileURL.path;
+    NSString *home = NSHomeDirectory();
+    NSString *directory = nil;
+    NSString *destination = nil;
+    const char *destPath = NULL;
+    int copyErrno = 0;
+
+    if (copiedOut != NULL) {
+        *copiedOut = NO;
+    }
+    if (errnoOut != NULL) {
+        *errnoOut = 0;
+    }
+    if (fileURL == nil || MyVCamPathIsInsideHome(path) || sourceFD < 0 || home.length == 0) {
+        return fileURL;
+    }
+    directory = [home stringByAppendingPathComponent:@"Library/MyVCam"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    destination = [directory stringByAppendingPathComponent:@"playback.mp4"];
+    destPath = destination.fileSystemRepresentation;
+    if (destPath == NULL) {
+        return fileURL;
+    }
+    copyErrno = MyVCamCopyFDToPath(sourceFD, destPath, sourceInfo);
+    struct stat destInfo;
+    memset(&destInfo, 0, sizeof(destInfo));
+    BOOL sizeOK = stat(destPath, &destInfo) == 0 && S_ISREG(destInfo.st_mode) &&
+        destInfo.st_size == sourceInfo->st_size;
+    if (copyErrno != 0 || !sizeOK) {
+        if (errnoOut != NULL) {
+            *errnoOut = copyErrno != 0 ? copyErrno : EIO;
+        }
+        NSLog(@"%s MediaReader container copy failed path=%s errno=%d",
+              kMyVCamDiagPrefix,
+              destPath,
+              copyErrno != 0 ? copyErrno : EIO);
+        return fileURL;
+    }
+    if (copiedOut != NULL) {
+        *copiedOut = YES;
+    }
+    return [NSURL fileURLWithPath:destination isDirectory:NO];
 }
 
 NS_ASSUME_NONNULL_BEGIN
@@ -383,22 +550,32 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
     if (fd >= 0 && !statOK) {
         openErrno = errno;
     }
+    BOOL copied = NO;
+    int copyErrno = 0;
+    NSURL *assetURL = fileURL;
+    if (statOK && S_ISREG(info.st_mode) && info.st_size > 0) {
+        assetURL = MyVCamDecodeURL(fileURL, fd, &info, &copied, &copyErrno);
+        if (copyErrno != 0) {
+            openErrno = copyErrno;
+        }
+    }
     if (fd >= 0) {
         close(fd);
     }
-    if (!statOK || !S_ISREG(info.st_mode) || info.st_size <= 0) {
+    if (!statOK || !S_ISREG(info.st_mode) || info.st_size <= 0 || assetURL == nil) {
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeInvalidURL
                              description:@"Media file does not exist."
                               underlying:nil];
         }
-        MyVCamMediaReaderLogOpen(fileURL, NO, openErrno, error != NULL ? *error : nil);
+        MyVCamMediaReaderLogOpen(fileURL, assetURL, NO, openErrno, copied, error != NULL ? *error : nil);
         return NO;
     }
 
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:fileURL options:nil];
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:assetURL options:nil];
     NSArray<AVAssetTrack *> *videoTracks = nil;
     if (![self loadVideoTracksForAsset:asset tracks:&videoTracks error:error]) {
+        MyVCamMediaReaderLogOpen(fileURL, assetURL, NO, openErrno, copied, error != NULL ? *error : nil);
         return NO;
     }
 
@@ -409,6 +586,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
                              description:@"The file has no video track."
                               underlying:nil];
         }
+        MyVCamMediaReaderLogOpen(fileURL, assetURL, NO, openErrno, copied, error != NULL ? *error : nil);
         return NO;
     }
 
@@ -421,47 +599,60 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
         *nominalOut = nominal;
     }
 
+    // IOSurface first. VideoToolbox on iOS 15 refuses that request for some
+    // files; the second attempt is CPU BGRA. The preview and the injector
+    // copy into their own IOSurface buffers, so the stored frame can be CPU-only.
+    NSArray<NSDictionary *> *settingsAttempts = @[
+        @{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+            (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+            (id)kCVPixelBufferIOSurfaceCoreAnimationCompatibilityKey: @YES,
+        },
+        @{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        },
+    ];
     NSError *readerError = nil;
-    AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:&readerError];
-    if (reader == nil) {
-        if (error != NULL) {
-            *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
-                             description:@"AVAssetReader could not be created."
-                              underlying:readerError];
+    AVAssetReader *reader = nil;
+    AVAssetReaderTrackOutput *output = nil;
+    for (NSDictionary *settings in settingsAttempts) {
+        if (reader != nil) {
+            [reader cancelReading];
+            reader = nil;
+            output = nil;
         }
-        return NO;
-    }
-
-    // IOSurface-backed buffers can be wrapped into a sample Camera will accept.
-    // A CPU-only buffer is a common first-frame crash once it is substituted.
-    NSDictionary *settings = @{
-        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
-    };
-    AVAssetReaderTrackOutput *output =
-        [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:settings];
-    output.alwaysCopiesSampleData = YES;
-    // -addOutput: returns void on this SDK and throws if the output is refused.
-    if (![reader canAddOutput:output]) {
-        [reader cancelReading];
-        if (error != NULL) {
-            *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
-                             description:@"Could not add the video track output to AVAssetReader."
-                              underlying:reader.error];
+        reader = [AVAssetReader assetReaderWithAsset:asset error:&readerError];
+        if (reader == nil) {
+            continue;
         }
-        return NO;
+        output = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:settings];
+        output.alwaysCopiesSampleData = YES;
+        // -addOutput: returns void on this SDK and throws if the output is refused.
+        if (![reader canAddOutput:output]) {
+            readerError = reader.error;
+            [reader cancelReading];
+            reader = nil;
+            output = nil;
+            continue;
+        }
+        [reader addOutput:output];
+        if (![reader startReading]) {
+            readerError = reader.error;
+            [reader cancelReading];
+            reader = nil;
+            output = nil;
+            continue;
+        }
+        break;
     }
-    [reader addOutput:output];
-    if (![reader startReading]) {
-        NSError *startError = reader.error;
-        [reader cancelReading];
+    if (reader == nil || output == nil) {
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
                              description:@"AVAssetReader failed to start reading."
-                              underlying:startError];
+                              underlying:readerError];
         }
-        MyVCamMediaReaderLogOpen(fileURL, NO, 0, error != NULL ? *error : startError);
+        MyVCamMediaReaderLogOpen(fileURL, assetURL, NO, openErrno, copied, error != NULL ? *error : readerError);
         return NO;
     }
 
@@ -474,7 +665,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
     if (outputOut != NULL) {
         *outputOut = output;
     }
-    MyVCamMediaReaderLogOpen(fileURL, YES, 0, nil);
+    MyVCamMediaReaderLogOpen(fileURL, assetURL, YES, 0, copied, nil);
     return YES;
 }
 
@@ -512,11 +703,16 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
 
     CMSampleBufferRef sampleBuffer = [_output copyNextSampleBuffer];
     if (sampleBuffer == NULL) {
+        // NULL while status is still Reading is not the end of the track.
+        // Treating it as end of media cancelled the feed before the first
+        // frame of a large file, and the viewfinder stayed on the live camera.
         if (_reader.status == AVAssetReaderStatusReading) {
-            _lastError = nil;
-        } else {
-            [self recordNonReadingStatusOnReaderQueue];
+            _lastError = [self errorWithCode:MyVCamMediaReaderErrorCodeTryAgain
+                                 description:@"AVAssetReader has no sample yet."
+                                  underlying:nil];
+            return NULL;
         }
+        [self recordNonReadingStatusOnReaderQueue];
         if (_frameIndex == 0) {
             static BOOL loggedFirstMiss = NO;
             if (!loggedFirstMiss) {

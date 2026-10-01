@@ -34,6 +34,9 @@ typedef NS_ENUM(NSInteger, MyVCamMediaReaderErrorCode) {
     MyVCamMediaReaderErrorCodeReaderFailed = 4,
     /// -copyNextPixelBuffer was called before a successful -prepareWithError:.
     MyVCamMediaReaderErrorCodeNotPrepared = 5,
+    /// copyNextSampleBuffer returned NULL while AVAssetReaderStatus is still
+    /// Reading. That is not end of media. The feed tick retries.
+    MyVCamMediaReaderErrorCodeTryAgain = 6,
 };
 
 @interface MediaReader : NSObject <MyVCamFrameSource>

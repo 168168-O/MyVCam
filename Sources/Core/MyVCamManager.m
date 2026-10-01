@@ -528,7 +528,7 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
     os_unfair_lock_unlock(&_stateLock);
     dispatch_resume(timer);
     NSLog(@"%s feed timer started at %d fps", kMyVCamC1CPrefix, kMyVCamFeedFramesPerSecond);
-    NSLog(@"[MyVCam 0.2.8] feed timer started fps=%d", kMyVCamFeedFramesPerSecond);
+    NSLog(@"[MyVCam 0.2.9] feed timer started fps=%d", kMyVCamFeedFramesPerSecond);
 }
 
 // Runs on com.myvcam.feed. Does not run on the capture delegate queue.
@@ -555,7 +555,7 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
             windowStart = now;
         }
         if (now - windowStart >= 1.0) {
-            NSLog(@"[MyVCam 0.2.8] injected frames/sec=%u", injected);
+            NSLog(@"[MyVCam 0.2.9] injected frames/sec=%u", injected);
             injected = 0;
             windowStart = now;
         }
@@ -566,6 +566,12 @@ static BOOL MyVCamManagerErrorIs(NSError * _Nullable error, MyVCamManagerErrorCo
     BOOL stale = !_reading || _pauseFeed || _feedGeneration != generation;
     os_unfair_lock_unlock(&_stateLock);
     if (stale || MyVCamManagerErrorIs(error, MyVCamManagerErrorCodeNotRunning)) {
+        return;
+    }
+    // Still Reading and no sample yet. Leave the timer armed.
+    if (error != nil &&
+        [error.domain isEqualToString:MyVCamMediaReaderErrorDomain] &&
+        error.code == MyVCamMediaReaderErrorCodeTryAgain) {
         return;
     }
     if (MyVCamManagerErrorIs(error, MyVCamManagerErrorCodeEndOfMedia)) {
