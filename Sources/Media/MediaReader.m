@@ -35,27 +35,55 @@
 #import <sys/stat.h>
 #import <unistd.h>
 
-static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.8]";
+static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.9]";
 
-static void MyVCamMediaReaderLogOpen(NSURL *fileURL, BOOL openOK, int openErrno, NSError * _Nullable readerError) {
-    NSString *path = fileURL.path ?: @"";
-    NSError *fileError = nil;
-    NSDictionary *attrs = nil;
-    if (path.length > 0) {
-        attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:&fileError];
+static const char *MyVCamReaderStatusName(BOOL created, AVAssetReaderStatus status) {
+    if (!created) {
+        return "none";
     }
-    unsigned long long size = attrs != nil ? [attrs fileSize] : 0;
-    NSError *reported = readerError ?: fileError;
-    NSLog(@"%s MediaReader open success=%d path=%s url=%@ exists=%d size=%llu open_errno=%d error_domain=%@ error_code=%ld",
+    switch (status) {
+        case AVAssetReaderStatusUnknown:
+            return "unknown";
+        case AVAssetReaderStatusReading:
+            return "reading";
+        case AVAssetReaderStatusCompleted:
+            return "completed";
+        case AVAssetReaderStatusFailed:
+            return "failed";
+        case AVAssetReaderStatusCancelled:
+            return "cancelled";
+    }
+    return "unknown";
+}
+
+static void MyVCamMediaReaderLogOpen(NSURL *fileURL,
+                                     BOOL exists,
+                                     BOOL assetCreated,
+                                     BOOL readerCreated,
+                                     AVAssetReaderStatus status,
+                                     int openErrno,
+                                     NSError * _Nullable readerError) {
+    NSString *path = fileURL.path ?: @"";
+    NSLog(@"%s MediaReader open path=%s exists=%d asset_create=%d reader_create=%d reader_status=%s open_errno=%d error_domain=%@ error_code=%ld",
           kMyVCamDiagPrefix,
-          openOK ? 1 : 0,
           path.UTF8String ?: "",
-          fileURL.absoluteString ?: @"",
-          attrs != nil ? 1 : 0,
-          size,
+          exists ? 1 : 0,
+          assetCreated ? 1 : 0,
+          readerCreated ? 1 : 0,
+          MyVCamReaderStatusName(readerCreated, status),
           openErrno,
-          reported.domain ?: @"-",
-          (long)(reported != nil ? reported.code : 0));
+          readerError.domain ?: @"-",
+          (long)(readerError != nil ? readerError.code : 0));
+}
+
+static void MyVCamLogFirstFrame(BOOL success, BOOL pixelBuffer) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSLog(@"%s first frame success=%d pixelbuffer=%d",
+              kMyVCamDiagPrefix,
+              success ? 1 : 0,
+              pixelBuffer ? 1 : 0);
+    });
 }
 
 NS_ASSUME_NONNULL_BEGIN
@@ -369,6 +397,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
                              description:@"MediaReader requires a local file URL."
                               underlying:nil];
         }
+        MyVCamMediaReaderLogOpen(fileURL, NO, NO, NO, AVAssetReaderStatusUnknown, EINVAL, error != NULL ? *error : nil);
         return NO;
     }
     // fileExistsAtPath: is the same class of check as access(): a sandbox
@@ -392,13 +421,14 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
                              description:@"Media file does not exist."
                               underlying:nil];
         }
-        MyVCamMediaReaderLogOpen(fileURL, NO, openErrno, error != NULL ? *error : nil);
+        MyVCamMediaReaderLogOpen(fileURL, NO, NO, NO, AVAssetReaderStatusUnknown, openErrno, error != NULL ? *error : nil);
         return NO;
     }
 
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:fileURL options:nil];
     NSArray<AVAssetTrack *> *videoTracks = nil;
     if (![self loadVideoTracksForAsset:asset tracks:&videoTracks error:error]) {
+        MyVCamMediaReaderLogOpen(fileURL, YES, YES, NO, AVAssetReaderStatusUnknown, openErrno, error != NULL ? *error : nil);
         return NO;
     }
 
@@ -409,6 +439,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
                              description:@"The file has no video track."
                               underlying:nil];
         }
+        MyVCamMediaReaderLogOpen(fileURL, YES, YES, NO, AVAssetReaderStatusUnknown, openErrno, error != NULL ? *error : nil);
         return NO;
     }
 
@@ -429,6 +460,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
                              description:@"AVAssetReader could not be created."
                               underlying:readerError];
         }
+        MyVCamMediaReaderLogOpen(fileURL, YES, YES, NO, AVAssetReaderStatusUnknown, openErrno, error != NULL ? *error : readerError);
         return NO;
     }
 
@@ -444,24 +476,28 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
     output.alwaysCopiesSampleData = YES;
     // -addOutput: returns void on this SDK and throws if the output is refused.
     if (![reader canAddOutput:output]) {
+        NSError *addError = reader.error;
+        AVAssetReaderStatus addStatus = reader.status;
         [reader cancelReading];
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
                              description:@"Could not add the video track output to AVAssetReader."
-                              underlying:reader.error];
+                              underlying:addError];
         }
+        MyVCamMediaReaderLogOpen(fileURL, YES, YES, YES, addStatus, openErrno, error != NULL ? *error : addError);
         return NO;
     }
     [reader addOutput:output];
     if (![reader startReading]) {
         NSError *startError = reader.error;
+        AVAssetReaderStatus startStatus = reader.status;
         [reader cancelReading];
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
                              description:@"AVAssetReader failed to start reading."
                               underlying:startError];
         }
-        MyVCamMediaReaderLogOpen(fileURL, NO, 0, error != NULL ? *error : startError);
+        MyVCamMediaReaderLogOpen(fileURL, YES, YES, YES, startStatus, openErrno, error != NULL ? *error : startError);
         return NO;
     }
 
@@ -474,7 +510,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
     if (outputOut != NULL) {
         *outputOut = output;
     }
-    MyVCamMediaReaderLogOpen(fileURL, YES, 0, nil);
+    MyVCamMediaReaderLogOpen(fileURL, YES, YES, YES, reader.status, 0, nil);
     return YES;
 }
 
@@ -503,10 +539,12 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
         _lastError = [self errorWithCode:MyVCamMediaReaderErrorCodeNotPrepared
                              description:@"MediaReader is not prepared."
                               underlying:nil];
+        MyVCamLogFirstFrame(NO, NO);
         return NULL;
     }
     if (_reader.status != AVAssetReaderStatusReading) {
         [self recordNonReadingStatusOnReaderQueue];
+        MyVCamLogFirstFrame(NO, NO);
         return NULL;
     }
 
@@ -517,15 +555,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
         } else {
             [self recordNonReadingStatusOnReaderQueue];
         }
-        if (_frameIndex == 0) {
-            static BOOL loggedFirstMiss = NO;
-            if (!loggedFirstMiss) {
-                loggedFirstMiss = YES;
-                NSLog(@"%s first frame read ok=0 path=%s",
-                      kMyVCamDiagPrefix,
-                      self.fileURL.path.UTF8String ?: "");
-            }
-        }
+        MyVCamLogFirstFrame(NO, NO);
         return NULL;
     }
 
@@ -535,6 +565,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
         _lastError = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
                              description:@"Decoded sample did not contain a pixel buffer."
                               underlying:nil];
+        MyVCamLogFirstFrame(NO, NO);
         return NULL;
     }
 
@@ -560,9 +591,7 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
     _lastError = nil;
     CFRelease(sampleBuffer);
     if (_frameIndex == 1) {
-        NSLog(@"%s first frame read ok=1 path=%s",
-              kMyVCamDiagPrefix,
-              self.fileURL.path.UTF8String ?: "");
+        MyVCamLogFirstFrame(YES, YES);
     }
     return retained;
 }
