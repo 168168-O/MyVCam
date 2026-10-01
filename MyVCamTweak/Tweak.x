@@ -86,6 +86,7 @@ static os_unfair_lock gLock = OS_UNFAIR_LOCK_INIT;
 static const char kMyVCamC1APrefix[] = "[MyVCam C1-A]";
 static const char kMyVCamC1BPrefix[] = "[MyVCam C1-B]";
 static const char kMyVCamC1CPrefix[] = "[MyVCam C1-C]";
+static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.8]";
 static const char kMyVCamDisablePath[] = "/var/mobile/Documents/MyVCam/disable";
 // Dopamine issues the sandbox extension for the real jbroot vnode
 // (JBROOT_PATH("/var/mobile")), not for the "/var/jb" symlink string.
@@ -118,14 +119,14 @@ static BOOL gPreviewLogged = NO;
 static BOOL gPreviewEnqueueFailedLogged = NO;
 static BOOL gPreviewMissingLogged = NO;
 static int gPreviewEnqueueStreak = 0;
-static char &kMyVCamOverlayAssociationKeyKey;
-static char &kMyVCamOpacityAssociationKeyKey;
+static char kMyVCamOverlayAssociationKey;
+static char kMyVCamOpacityAssociationKey;
 static __thread int gMyVCamInDelegateHook;
 static int gMyVCamStartDepth = 0;
 static __thread int gMyVCamInStop;
 
 static void MyVCamC1B_MatchTick(uint64_t generation);
-static void MyVCamC1C_SessionDidStart(uint64_t generation);
+static BOOL MyVCamC1C_SessionDidStart(uint64_t generation);
 static void MyVCamC1C_ScheduleEnable(uint64_t generation);
 static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt, int prepareFailures);
 static void MyVCamPreview_Start(void);
@@ -245,6 +246,7 @@ static void MyVCamC1B_LogPathOnce(BOOL replaced) {
     } else {
         NSLog(@"%s pass-through original sampleBuffer", kMyVCamC1BPrefix);
     }
+    NSLog(@"%s hook hit replaced=%d", kMyVCamDiagPrefix, replaced ? 1 : 0);
 }
 
 static BOOL MyVCamC1B_OriginIsVideoImage(CMSampleBufferRef sampleBuffer) {
@@ -829,6 +831,52 @@ static void MyVCamC1C_NoteSessionStopped(void) {
     MyVCamPreview_Stop();
 }
 
+static void MyVCamC1C_LogFileProbe(const char *role, const char *path) {
+    NSString *nsPath = path != NULL ? [NSString stringWithUTF8String:path] : nil;
+    NSError *error = nil;
+    NSDictionary *attrs = nil;
+    if (nsPath.length > 0) {
+        attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:nsPath error:&error];
+    }
+    unsigned long long size = 0;
+    if (attrs != nil) {
+        size = [attrs fileSize];
+    }
+    NSLog(@"%s %s path=%s exists=%d size=%llu error_domain=%@ error_code=%ld",
+          kMyVCamDiagPrefix,
+          role != NULL ? role : "file",
+          path != NULL ? path : "(null)",
+          attrs != nil ? 1 : 0,
+          size,
+          error.domain ?: @"-",
+          (long)(error != nil ? error.code : 0));
+}
+
+static void MyVCamC1C_LogCopyDiagnostics(const char *status) {
+    int copied = 0;
+    int copyErrno = 0;
+    int sawCopied = 0;
+    if (status != NULL) {
+        const char *copiedKey = strstr(status, "copied=");
+        const char *errnoKey = strstr(status, "copy_errno=");
+        if (copiedKey != NULL) {
+            copied = atoi(copiedKey + strlen("copied="));
+            sawCopied = 1;
+        }
+        if (errnoKey != NULL) {
+            copyErrno = atoi(errnoKey + strlen("copy_errno="));
+        }
+    }
+    // The helper is C and reports POSIX errno. NSPOSIXErrorDomain is that
+    // code's Foundation domain so the device log has domain and code.
+    NSLog(@"%s copy success=%d error_domain=%@ error_code=%d status_present=%d",
+          kMyVCamDiagPrefix,
+          (sawCopied && copied != 0) ? 1 : 0,
+          @"NSPOSIXErrorDomain",
+          copyErrno,
+          status != NULL && status[0] != '\0' ? 1 : 0);
+}
+
 static void MyVCamC1C_LogMirrorStatus(int attempt, int videoErrno) {
     char status[1024];
     char libraryVideo[PATH_MAX];
@@ -838,6 +886,9 @@ static void MyVCamC1C_LogMirrorStatus(int attempt, int videoErrno) {
     MyVCamC1C_ReadStatus(status, sizeof(status));
     libraryVideo[0] = '\0';
     MyVCamC1C_CopyLibraryPath("MyVCam/test.mp4", libraryVideo, sizeof(libraryVideo));
+    MyVCamC1C_LogFileProbe("source", MyVCamManagerTestVideoPathUTF8);
+    MyVCamC1C_LogFileProbe("dest", kMyVCamMirrorVideoPath);
+    MyVCamC1C_LogCopyDiagnostics(status);
     if (status[0] == '\0') {
         NSLog(@"%s mirror status unreadable errno=%d library=%s",
               kMyVCamC1CPrefix,
@@ -971,6 +1022,10 @@ static void MyVCamC1A_Deliver(id self,
 }
 
 static void MyVCamC1A_DidOutput(id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
+    static dispatch_once_t hookOnce;
+    dispatch_once(&hookOnce, ^{
+        NSLog(@"%s hook hit", kMyVCamDiagPrefix);
+    });
     if (self == nil) {
         return;
     }
@@ -1281,6 +1336,25 @@ static void MyVCamPreview_RemoveOverlays(void) {
     gPreviewEnqueueStreak = 0;
 }
 
+static void MyVCamPreview_LogOverlay(BOOL ok, UIView *host, UIView *overlay) {
+    static int lastState = -1;
+    BOOL inWindow = overlay != nil && overlay.window != nil;
+    BOOL inHierarchy = overlay != nil && (overlay.superview != nil || overlay.layer.superlayer != nil);
+    int state = ok ? (inWindow ? 2 : 1) : 0;
+    if (state == lastState) {
+        return;
+    }
+    lastState = state;
+    NSLog(@"%s overlay create ok=%d view=%@ layer=%@ added_to=%@ in_window=%d hierarchy=%d",
+          kMyVCamDiagPrefix,
+          ok ? 1 : 0,
+          overlay != nil ? NSStringFromClass(overlay.class) : @"-",
+          overlay != nil ? NSStringFromClass(overlay.layer.class) : @"-",
+          host != nil ? NSStringFromClass(host.class) : @"-",
+          inWindow ? 1 : 0,
+          inHierarchy ? 1 : 0);
+}
+
 /// UIView above the live image. When the preview is only a sublayer, its
 /// opacity is cleared while this view is in a window so the camera surface
 /// cannot paint over the imported frames. Chrome that is a later subview of
@@ -1306,6 +1380,9 @@ static AVSampleBufferDisplayLayer *MyVCamPreview_Overlay(AVCaptureVideoPreviewLa
     }
     if (overlay == nil) {
         if (!create || host == nil || CGRectIsEmpty(frame)) {
+            if (create) {
+                MyVCamPreview_LogOverlay(NO, host, nil);
+            }
             return nil;
         }
         overlay = [[MyVCamPreviewHostView alloc] initWithFrame:frame];
@@ -1325,6 +1402,7 @@ static AVSampleBufferDisplayLayer *MyVCamPreview_Overlay(AVCaptureVideoPreviewLa
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (host == nil || CGRectIsEmpty(frame)) {
+        MyVCamPreview_LogOverlay(NO, host, overlay);
         return nil;
     }
     overlay.frame = frame;
@@ -1346,6 +1424,7 @@ static AVSampleBufferDisplayLayer *MyVCamPreview_Overlay(AVCaptureVideoPreviewLa
         loggedHost = YES;
         NSLog(@"%s preview overlay attached host=%@", kMyVCamC1CPrefix, NSStringFromClass(host.class));
     }
+    MyVCamPreview_LogOverlay(YES, host, overlay);
     return (AVSampleBufferDisplayLayer *)overlay.layer;
 }
 

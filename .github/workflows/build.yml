@@ -182,6 +182,10 @@ jobs:
             echo "merged dylib is missing the preview overlay log" >&2
             exit 1
           fi
+          if ! grep -a -F '[MyVCam 0.2.8]' "$merged"; then
+            echo "merged dylib is missing the 0.2.8 diagnostic prefix" >&2
+            exit 1
+          fi
           mkdir -p artifacts
           cp -v "$merged" artifacts/MyVCamTweak.dylib
 
@@ -284,6 +288,10 @@ jobs:
           fi
           if ! grep -a -F 'com.apple.camera' "${mirrors[0]}"; then
             echo "myvcam-mirror is missing the Camera container identifier" >&2
+            exit 1
+          fi
+          if ! grep -a -F '[MyVCam 0.2.8]' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing the 0.2.8 diagnostic prefix" >&2
             exit 1
           fi
           if ! grep -a -q '<string>--watch</string>' "${mirror_plists[0]}"; then

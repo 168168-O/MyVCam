@@ -390,6 +390,24 @@ static void write_status(uid_t uid,
         write_text_file(kContainerRecord, gContainerVideo, uid, gid);
     }
     syslog(LOG_NOTICE, "[MyVCam mirror] %s", line);
+    {
+        struct stat sourceInfo;
+        struct stat destInfo;
+        int sourceExists = stat(kSourceVideo, &sourceInfo) == 0 && S_ISREG(sourceInfo.st_mode);
+        int destExists = stat(kDestVideo, &destInfo) == 0 && S_ISREG(destInfo.st_mode);
+        long long destSize = destExists ? (long long)destInfo.st_size : 0;
+        int reported = copyErrno != 0 ? copyErrno : sourceErrno;
+        syslog(LOG_NOTICE,
+               "[MyVCam 0.2.8] source=%s dest=%s source_exists=%d dest_exists=%d dest_size=%lld copy_ok=%d errno=%d error_domain=NSPOSIXErrorDomain error_code=%d",
+               kSourceVideo,
+               kDestVideo,
+               sourceExists,
+               destExists,
+               destSize,
+               copied,
+               reported,
+               reported);
+    }
 }
 
 static int source_stat(const char *path, struct stat *info, int *errOut) {
