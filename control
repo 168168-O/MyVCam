@@ -2,7 +2,7 @@ Package: com.myvcam.tweak
 Name: MyVCam
 Version: 0.2.3
 Architecture: iphoneos-arm64
-Description: Local-file reader and sample-buffer builder. Video injection is not implemented.
+Description: Camera feed loop from a fixed local video into the capture delegate. No mediaserverd injection.
 Maintainer: MyVCam Project
 Author: MyVCam Project
 Section: Tweaks

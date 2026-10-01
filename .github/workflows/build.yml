@@ -134,6 +134,18 @@ jobs:
             echo "merged dylib is missing copyLatestSampleBufferMatchingOrigin:" >&2
             exit 1
           fi
+          if ! grep -a -F '[MyVCam C1-C]' "$merged"; then
+            echo "merged dylib is missing the C1-C log prefix" >&2
+            exit 1
+          fi
+          if ! grep -a -F '/var/mobile/Documents/MyVCam/test.mp4' "$merged"; then
+            echo "merged dylib is missing the C1-C test video path" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'com.myvcam.feed' "$merged"; then
+            echo "merged dylib is missing the C1-C feed queue label" >&2
+            exit 1
+          fi
           mkdir -p artifacts
           cp -v "$merged" artifacts/MyVCamTweak.dylib
 

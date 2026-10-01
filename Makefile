@@ -1,8 +1,8 @@
 #
 # MyVCam — rootless aggregate.
 #
-# Stage 2.2 adds a local-file reader and sample-buffer builder.
-# This Makefile does not enable injection, mediaserverd, or any capture hook.
+# Aggregate rootless package. Capture hooks live in the tweak subproject.
+# This Makefile does not install onto a device and does not target mediaserverd.
 #
 
 export THEOS_PACKAGE_SCHEME = rootless

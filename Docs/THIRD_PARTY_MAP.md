@@ -11,8 +11,8 @@ Do not treat this file as a merge log.
 | `MediaReader` | [W9720/DiCoy](https://github.com/W9720/DiCoy) `DiCoyTweak` `_setupVideoReaderForPath:` | Local `AVURLAsset`, first video track, `AVAssetReaderTrackOutput`, `32BGRA` | Audio reader, looping clock, rotation, `alwaysCopiesSampleData = NO`, hooks |
 | `SampleBufferBuilder` | DiCoy `buildSampleBufferMatchingBuffer` | `CMVideoFormatDescriptionCreateForImageBuffer` then `CMSampleBufferCreateForImageBuffer` | Origin camera buffer, timing copied from a capture sample, EXIF/TIFF, IOSurface screen-mirror path, pixel-format conversion |
 | `SampleBufferBuilder` | [MurkAskA01/ios-vcam](https://github.com/MurkAskA01/ios-vcam) `_create_buffer` | Same conversion shape: pixel buffer plus a `CMSampleTimingInfo` | `AVAssetStreamAdapter`, HLS, MJPEG, RTSP, and the rest of that network path. The function was not ported |
-| `MyVCamManager` | DiCoy `DiCoyTweakManager` | One object owns the reader and asks for the next frame. Phase B also calls the local injector | Daemon client, screen mirror, preview cache, audio, hook-based inject |
-| `VideoInjector` | DiCoy AVFoundation hooks, later | Armed non-NULL `injectSampleBuffer:error:` `CFRetain`s the latest buffer and returns `YES`. `stop` releases it. `copyLatestSampleBufferMatchingOrigin:` returns a new caller-owned buffer timed like the origin sample | Capture-session feed loop, swizzles inside this class, and delivery into mediaserverd |
+| `MyVCamManager` | DiCoy `DiCoyTweakManager` | One object owns the reader and asks for the next frame. Phase B also calls the local injector. C1-C schedules that call on `com.myvcam.feed` | Daemon client, screen mirror, preview cache, audio, hook-based inject inside the manager |
+| `VideoInjector` | DiCoy AVFoundation hooks, later | Armed non-NULL `injectSampleBuffer:error:` `CFRetain`s the latest buffer and returns `YES`. `stop` releases it. `copyLatestSampleBufferMatchingOrigin:` returns a new caller-owned buffer timed like the origin sample | Swizzles inside this class, and delivery into mediaserverd. The feed loop lives on `MyVCamManager`, not here |
 | (none) | [EthanArbuckle/vcam-ios](https://github.com/EthanArbuckle/vcam-ios) | Deferred | `BWNodeOutput` and mediaserverd injection are not a MyVCam interface |
 
 `MediaReader` returns a `CVPixelBuffer`. DiCoy's reader path returns a `CMSampleBuffer` from the same manager that also injects. Those steps stay split here.
@@ -32,7 +32,7 @@ Still out of MyVCam:
 - DiCoyServer / IPC / Mach XPC
 - Screen mirror and the daemon IOSurface path
 - Preferences UI
-- A capture-session feed loop. C1-A installs the Camera delegate hook. C1-B reads `VideoInjector` from that hook and passes a replacement only when a frame is already stored. The tweak does not call `inject` or start a session. Phase A arms a local flag and Phase B calls that injector from `MyVCamManager`
+- Preferences, audio, and screen mirror. C1-A installs the Camera delegate hook. C1-B reads `VideoInjector` from that hook. C1-C's tweak hooks `AVCaptureSession` start/stop and calls the manager; the manager owns the feed timer. The injector class still has no swizzle. Phase A arms a local flag and Phase B calls that injector from `MyVCamManager`
 
 ### MurkAskA01/ios-vcam
 
@@ -52,7 +52,11 @@ Listed so the mediaserverd / `BWNodeOutput` path stays deferred. C1-A and C1-B f
 
 ## C1-B
 
-The same delegate hook calls `-[VideoInjector copyLatestSampleBufferMatchingOrigin:]` on the shared manager's injector. Non-NULL: the original IMP receives that caller-owned buffer, then the hook `CFRelease`s it. NULL: the original IMP receives the original `sampleBuffer`. The original buffer is not mutated. `[MyVCam C1-B]` logs the first replace and the first pass-through. Compile and package do not prove a live swap. A replacement exists only after something else has `injectSampleBuffer:`'d a frame. C1-C (the feed loop) is not in this change.
+The same delegate hook calls `-[VideoInjector copyLatestSampleBufferMatchingOrigin:]` on the shared manager's injector. Non-NULL: the original IMP receives that caller-owned buffer, then the hook `CFRelease`s it. NULL: the original IMP receives the original `sampleBuffer`. The original buffer is not mutated. `[MyVCam C1-B]` logs the first replace and the first pass-through. Compile and package do not prove a live swap. A replacement exists only after `injectSampleBuffer:` has stored a frame. C1-C is that caller.
+
+## C1-C
+
+`MyVCamManager` arms a 30 fps `dispatch_source` timer on `com.myvcam.feed` from `startWithError:`. Each tick calls `injectNextSampleBufferWithError:`. End of the file prepares the reader again from the start. A missing `/var/mobile/Documents/MyVCam/test.mp4` fails `startWithError:` and does not arm the timer. `Tweak.x` calls attach+start from `AVCaptureSession` `startRunning` and `stop` from `stopRunning`. The delegate hook still does not inject. The filter stays `com.apple.camera` only.
 
 ## Layering
 
@@ -69,6 +73,6 @@ MyVCamManager
 - `lastError` on `MyVCamFrameSource` is how the manager tells end of media from a failed read. It does not downcast to `MediaReader`.
 - `SampleBufferBuilder` only converts `CVPixelBuffer` to `CMSampleBuffer`.
 - `VideoInjector` stores and reads. `prepareWithError:` returns `YES` for a local flag. Armed non-NULL `injectSampleBuffer:error:` retains `_latest` and returns `YES`. `copyLatestSampleBufferMatchingOrigin:` does not import `SampleBufferBuilder`. It builds a new image sample buffer from the stored pixel buffer and the origin timing. The caller `CFRelease`s that result.
-- Phase B calls `prepare`, `inject`, and `stop` from `MyVCamManager` only. `copyNextSampleBufferWithError:` does not. The inject path produces through `copyNextSampleBufferLockedWithError:` while the manager lock is held, borrows the buffer, then `CFRelease`s it once. A `NO` from the injector stays `NO` (`InjectFailed`, underlying injector error). End of media on that path is `EndOfMedia`. The public copy path still uses `NULL` and a nil error. The C1-B hook reads the same injector and does not call `inject`.
+- Phase B calls `prepare`, `inject`, and `stop` from `MyVCamManager` only. `copyNextSampleBufferWithError:` does not. The inject path produces through `copyNextSampleBufferLockedWithError:` while the manager lock is held, borrows the buffer, then `CFRelease`s it once. A `NO` from the injector stays `NO` (`InjectFailed`, underlying injector error). End of media on that path is `EndOfMedia`. The public copy path still uses `NULL` and a nil error. The C1-B hook reads the same injector and does not call `inject`. C1-C's timer calls `injectNext` on `com.myvcam.feed` and loops by preparing the frame source again. It does not teach `VideoInjector` about the reader.
 - The manager lock is the outer lock. Reader and injector locks are leaves. Do not nest them back into the manager.
 - Do not collapse these types into one class to match a third-party file.
