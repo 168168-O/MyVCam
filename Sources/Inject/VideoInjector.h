@@ -71,6 +71,13 @@ typedef NS_ENUM(NSInteger, MyVCamVideoInjectorErrorCode) {
 - (void)stop;
 
 /// Caller owns the result (CF_RETURNS_RETAINED) and must CFRelease it.
+/// A retained copy of the stored latest sample buffer, or NULL when none is
+/// stored. Does not convert, restamp, or mutate the stored buffer. The
+/// preview layer uses this; the capture delegate uses
+/// copyLatestSampleBufferMatchingOrigin: instead.
+- (CMSampleBufferRef _Nullable)copyLatestSampleBuffer CF_RETURNS_RETAINED;
+
+/// Caller owns the result (CF_RETURNS_RETAINED) and must CFRelease it.
 /// NULL when origin is NULL or invalid, when origin is not a video image
 /// buffer, when no latest buffer is stored, when the origin presentation
 /// time is not numeric, when the origin pixel format is not 32BGRA / 420f /

@@ -35,6 +35,6 @@ MyVCamTweak_CFLAGS = -fobjc-arc \
 	-I$(SRC)/Buffer \
 	-I$(SRC)/Inject
 
-MyVCamTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo Accelerate
+MyVCamTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo Accelerate QuartzCore UIKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
