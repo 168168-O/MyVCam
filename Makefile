@@ -3,7 +3,7 @@
 #
 # Aggregate rootless package. Capture hooks live in the tweak subproject.
 # myvcam-mirror is a root helper, not a filter. It copies test.mp4 under
-# /var/jb because Camera cannot read /var/mobile/Documents.
+# /var/jb and into Camera's container because Camera cannot read Documents.
 # This Makefile does not install onto a device and does not target mediaserverd.
 #
 

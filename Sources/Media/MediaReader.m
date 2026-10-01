@@ -29,6 +29,10 @@
 
 #import "MediaReader.h"
 #import <AVFoundation/AVFoundation.h>
+#import <fcntl.h>
+#import <string.h>
+#import <sys/stat.h>
+#import <unistd.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -343,10 +347,18 @@ static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
         }
         return NO;
     }
-    BOOL isDirectory = NO;
-    BOOL fileExists = [[NSFileManager defaultManager] fileExistsAtPath:fileURL.path
-                                                            isDirectory:&isDirectory];
-    if (!fileExists || isDirectory) {
+    // fileExistsAtPath: is the same class of check as access(): a sandbox
+    // denial is reported as "missing". open() is what the feed is allowed
+    // to do, including Camera's container and the real jbroot path.
+    const char *path = fileURL.path.fileSystemRepresentation;
+    int fd = path != NULL ? open(path, O_RDONLY) : -1;
+    struct stat info;
+    memset(&info, 0, sizeof(info));
+    int statOK = fd >= 0 && fstat(fd, &info) == 0;
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (!statOK || !S_ISREG(info.st_mode)) {
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeInvalidURL
                              description:@"Media file does not exist."

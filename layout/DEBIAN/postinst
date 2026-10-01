@@ -1,10 +1,21 @@
 #!/bin/sh
-# Copy the test video into /var/jb before Camera is opened, and keep the
-# helper loaded so a later replace of test.mp4 is mirrored too.
+# Copy the test video before Camera is opened, then keep a root helper
+# running so a later replace of test.mp4 is mirrored too. Install still
+# succeeds when launchctl is missing; the one-shot copy is the fallback.
 
 MIRROR="/var/jb/usr/bin/myvcam-mirror"
 PLIST="/var/jb/Library/LaunchDaemons/com.myvcam.mirror.plist"
+LOGDIR="/var/jb/var/mobile/Library/MyVCam"
+LOG="$LOGDIR/postinst.log"
 LAUNCHCTL=""
+
+mkdir -p "$LOGDIR"
+chmod 0755 "$LOGDIR" 2>/dev/null || true
+
+if [ -f "$MIRROR" ]; then
+    chown root:wheel "$MIRROR" 2>/dev/null || true
+    chmod 755 "$MIRROR" 2>/dev/null || true
+fi
 
 if [ -x /var/jb/usr/bin/launchctl ]; then
     LAUNCHCTL="/var/jb/usr/bin/launchctl"
@@ -12,16 +23,28 @@ elif [ -x /var/jb/bin/launchctl ]; then
     LAUNCHCTL="/var/jb/bin/launchctl"
 fi
 
-if [ -n "$LAUNCHCTL" ] && [ -f "$PLIST" ]; then
-    "$LAUNCHCTL" bootout system/com.myvcam.mirror >/dev/null 2>&1 || true
-    "$LAUNCHCTL" bootstrap system "$PLIST" >/dev/null 2>&1 || \
-        "$LAUNCHCTL" load -w "$PLIST" >/dev/null 2>&1 || true
-    "$LAUNCHCTL" enable system/com.myvcam.mirror >/dev/null 2>&1 || true
-    "$LAUNCHCTL" kickstart -k system/com.myvcam.mirror >/dev/null 2>&1 || true
-fi
+{
+    echo "postinst euid=$(id -u 2>/dev/null || echo unknown)"
+    if [ -x "$MIRROR" ]; then
+        "$MIRROR"
+        echo "mirror one-shot exit $?"
+    else
+        echo "mirror missing or not executable: $MIRROR"
+    fi
 
-if [ -x "$MIRROR" ]; then
-    "$MIRROR" || true
-fi
+    if [ -n "$LAUNCHCTL" ] && [ -f "$PLIST" ]; then
+        "$LAUNCHCTL" bootout system/com.myvcam.mirror
+        echo "bootout exit $?"
+        "$LAUNCHCTL" bootstrap system "$PLIST"
+        echo "bootstrap exit $?"
+        "$LAUNCHCTL" enable system/com.myvcam.mirror
+        echo "enable exit $?"
+        "$LAUNCHCTL" kickstart -k system/com.myvcam.mirror
+        echo "kickstart exit $?"
+    else
+        echo "launchctl or plist missing launchctl=${LAUNCHCTL:-none} plist=$PLIST"
+    fi
+} >"$LOG" 2>&1 || true
 
+chmod 0644 "$LOG" 2>/dev/null || true
 exit 0
