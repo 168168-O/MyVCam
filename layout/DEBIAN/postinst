@@ -11,6 +11,12 @@ LAUNCHCTL=""
 
 mkdir -p "$LOGDIR"
 chmod 0755 "$LOGDIR" 2>/dev/null || true
+# Camera can write this file without directory write permission. Filza reads it.
+if [ ! -f "$LOGDIR/runtime.status" ]; then
+    : > "$LOGDIR/runtime.status" || true
+fi
+chmod 0666 "$LOGDIR/runtime.status" 2>/dev/null || true
+chown mobile:mobile "$LOGDIR/runtime.status" 2>/dev/null || true
 
 if [ -f "$MIRROR" ]; then
     chown root:wheel "$MIRROR" 2>/dev/null || true

@@ -30,6 +30,7 @@ static const char kDestDir[] = "/var/jb/var/mobile/Library/MyVCam";
 static const char kDestVideo[] = "/var/jb/var/mobile/Library/MyVCam/test.mp4";
 static const char kDestVideoTemp[] = "/var/jb/var/mobile/Library/MyVCam/test.mp4.tmp";
 static const char kDestDisable[] = "/var/jb/var/mobile/Library/MyVCam/disable";
+static const char kRuntimeStatus[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
 static const char kLockPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.lock";
 static const char kContainerRecord[] = "/var/jb/var/mobile/Library/MyVCam/container.path";
 static const char kCameraIdentifier[] = "com.apple.camera";
@@ -454,6 +455,76 @@ static void sync_disable(uid_t uid, gid_t gid) {
     }
 }
 
+static void ensure_status_file(const char *path, uid_t uid, gid_t gid) {
+    struct stat info;
+    int fd = -1;
+
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    if (stat(path, &info) != 0) {
+        fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+        if (fd >= 0) {
+            if (fchmod(fd, 0666) != 0) {
+                syslog(LOG_NOTICE, "[MyVCam mirror] chmod %s failed errno=%d", path, errno);
+            }
+            if (fchown(fd, uid, gid) != 0) {
+                syslog(LOG_NOTICE, "[MyVCam mirror] chown %s failed errno=%d", path, errno);
+            }
+            close(fd);
+        }
+        return;
+    }
+    if (chmod(path, 0666) != 0) {
+        syslog(LOG_NOTICE, "[MyVCam mirror] chmod %s failed errno=%d", path, errno);
+    }
+    if (chown(path, uid, gid) != 0) {
+        syslog(LOG_NOTICE, "[MyVCam mirror] chown %s failed errno=%d", path, errno);
+    }
+}
+
+static void publish_runtime_status(uid_t uid, gid_t gid) {
+    char containerStatus[PATH_MAX];
+    char temporary[PATH_MAX];
+    struct stat source;
+    struct stat dest;
+    int wrote = 0;
+
+    ensure_status_file(kRuntimeStatus, uid, gid);
+    if (!gContainerReady) {
+        return;
+    }
+    wrote = snprintf(containerStatus, sizeof(containerStatus), "%s/runtime.status", gContainerDir);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(containerStatus)) {
+        return;
+    }
+    ensure_status_file(containerStatus, uid, gid);
+    if (stat(containerStatus, &source) != 0 || !S_ISREG(source.st_mode) || source.st_size <= 0) {
+        return;
+    }
+    if (stat(kRuntimeStatus, &dest) == 0 &&
+        S_ISREG(dest.st_mode) &&
+        dest.st_size == source.st_size &&
+        dest.st_mtime >= source.st_mtime) {
+        return;
+    }
+    wrote = snprintf(temporary, sizeof(temporary), "%s.tmp", kRuntimeStatus);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(temporary)) {
+        return;
+    }
+    if (copy_file(containerStatus, kRuntimeStatus, temporary, uid, gid) != 0) {
+        syslog(LOG_NOTICE, "[MyVCam mirror] runtime.status copy failed errno=%d", errno);
+        return;
+    }
+    if (chmod(kRuntimeStatus, 0666) != 0) {
+        syslog(LOG_NOTICE, "[MyVCam mirror] runtime.status chmod failed errno=%d", errno);
+    }
+    if (chown(kRuntimeStatus, uid, gid) != 0) {
+        syslog(LOG_NOTICE, "[MyVCam mirror] runtime.status chown failed errno=%d", errno);
+    }
+    syslog(LOG_NOTICE, "[MyVCam 0.2.13] runtime.status publish bytes=%lld", (long long)source.st_size);
+}
+
 static void mirror_once(void) {
     uid_t uid = 501;
     gid_t gid = 501;
@@ -485,6 +556,7 @@ static void mirror_once(void) {
     }
 
     sync_disable(uid, gid);
+    publish_runtime_status(uid, gid);
 
     memset(&source, 0, sizeof(source));
     if (!source_stat(kSourceVideo, &source, &sourceErrno) || !S_ISREG(source.st_mode) || source.st_size <= 0) {

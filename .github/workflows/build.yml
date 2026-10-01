@@ -182,8 +182,12 @@ jobs:
             echo "merged dylib is missing the preview overlay log" >&2
             exit 1
           fi
-          if ! grep -a -F '[MyVCam 0.2.12]' "$merged"; then
-            echo "merged dylib is missing the 0.2.12 diagnostic prefix" >&2
+          if ! grep -a -F '[MyVCam 0.2.13]' "$merged"; then
+            echo "merged dylib is missing the 0.2.13 diagnostic prefix" >&2
+            exit 1
+          fi
+          if ! grep -a -F '/var/jb/var/mobile/Library/MyVCam/runtime.status' "$merged"; then
+            echo "merged dylib is missing runtime.status" >&2
             exit 1
           fi
           if ! grep -a -F 'preview connection blocked' "$merged"; then
@@ -253,8 +257,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.12' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.12" >&2
+          if ! grep -q '^Version: 0.2.13' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.13" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"
@@ -320,6 +324,10 @@ jobs:
           fi
           if ! grep -a -F '[MyVCam 0.2.8]' "${mirrors[0]}"; then
             echo "myvcam-mirror is missing the 0.2.8 diagnostic prefix" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'runtime.status' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing runtime.status" >&2
             exit 1
           fi
           if ! grep -a -q '<string>--watch</string>' "${mirror_plists[0]}"; then
