@@ -8,7 +8,7 @@
 		<array>
 			<!--
 			  C1-A/B/C run inside Camera only. One bundle.
-			  C1-C starts the manager feed from AVCaptureSession.
+			  C1-C arms the manager feed after the first video sample.
 			-->
 			<string>com.apple.camera</string>
 		</array>

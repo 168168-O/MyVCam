@@ -9,6 +9,13 @@
 //  buffer from the reader's CMSampleBuffer and releases that sample buffer.
 //  It does not call CMSampleBufferCreateForImageBuffer.
 //
+//  Reader ivars are touched only on com.myvcam.reader. copyNextSampleBuffer
+//  and cancelReading are never in flight together: the queue drains the copy
+//  before the reader pointer is dropped, and cancelReading runs after that
+//  queue block returns. The slow track load is not on that queue and does not
+//  hold a lock. On the main thread the synchronous tracks API is used so a
+//  completion handler cannot deadlock the thread that is waiting for it.
+//
 //  LAYERING: this file must not import SampleBufferBuilder.h or VideoInjector.h.
 //
 //  Adapted from the shape of DiCoy _setupVideoReaderForPath: (local file,
@@ -19,31 +26,36 @@
 
 #import "MediaReader.h"
 #import <AVFoundation/AVFoundation.h>
-#import <os/lock.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
 
+static void * const kMyVCamReaderQueueKey = (void *)&kMyVCamReaderQueueKey;
+
 @interface MediaReader ()
-- (BOOL)prepareLockedWithError:(NSError * _Nullable * _Nullable)error;
-- (CVPixelBufferRef _Nullable)copyNextPixelBufferLocked;
-- (void)recordNonReadingStatusLocked;
-- (void)teardownLocked;
-- (NSError *)errorWithCode:(MyVCamMediaReaderErrorCode)code
-               description:(NSString *)description
-                underlying:(nullable NSError *)underlying;
+- (void)performOnReaderQueue:(dispatch_block_t)block;
+- (BOOL)buildReaderForFileURL:(NSURL *)fileURL
+                        asset:(AVURLAsset * _Nullable * _Nonnull)assetOut
+                       reader:(AVAssetReader * _Nullable * _Nonnull)readerOut
+                       output:(AVAssetReaderTrackOutput * _Nullable * _Nonnull)outputOut
+              nominalDuration:(CMTime *)nominalOut
+                        error:(NSError * _Nullable * _Nullable)error;
+- (CVPixelBufferRef _Nullable)copyNextPixelBufferOnReaderQueue;
+- (void)recordNonReadingStatusOnReaderQueue;
+- (void)clearReaderFieldsOnReaderQueue;
 @end
 
 @implementation MediaReader {
     AVURLAsset *_asset;
     AVAssetReader *_reader;
     AVAssetReaderTrackOutput *_output;
-    os_unfair_lock _lock;
+    dispatch_queue_t _readerQueue;
     CMTime _presentationTime;
     CMTime _duration;
     CMTime _nominalFrameDuration;
     int32_t _frameIndex;
+    uint64_t _prepareGeneration;
     BOOL _prepared;
     NSError *_Nullable _lastError;
 }
@@ -54,7 +66,8 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
         return nil;
     }
     _fileURL = [fileURL copy];
-    _lock = OS_UNFAIR_LOCK_INIT;
+    _readerQueue = dispatch_queue_create("com.myvcam.reader", DISPATCH_QUEUE_SERIAL);
+    dispatch_queue_set_specific(_readerQueue, kMyVCamReaderQueueKey, kMyVCamReaderQueueKey, NULL);
     _presentationTime = kCMTimeInvalid;
     _duration = kCMTimeInvalid;
     _nominalFrameDuration = CMTimeMake(1, 30);
@@ -62,18 +75,27 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
 }
 
 - (void)dealloc {
-    os_unfair_lock_lock(&_lock);
-    [_reader cancelReading];
-    _reader = nil;
-    _output = nil;
-    _asset = nil;
-    os_unfair_lock_unlock(&_lock);
+    __block AVAssetReader *retired = nil;
+    [self performOnReaderQueue:^{
+        retired = _reader;
+        [self clearReaderFieldsOnReaderQueue];
+    }];
+    [retired cancelReading];
+}
+
+- (void)performOnReaderQueue:(dispatch_block_t)block {
+    if (dispatch_get_specific(kMyVCamReaderQueueKey) == kMyVCamReaderQueueKey) {
+        block();
+        return;
+    }
+    dispatch_sync(_readerQueue, block);
 }
 
 - (NSError *_Nullable)lastError {
-    os_unfair_lock_lock(&_lock);
-    NSError *_Nullable error = _lastError;
-    os_unfair_lock_unlock(&_lock);
+    __block NSError *_Nullable error = nil;
+    [self performOnReaderQueue:^{
+        error = _lastError;
+    }];
     return error;
 }
 
@@ -91,59 +113,140 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
 #pragma mark - MyVCamFrameSource
 
 - (BOOL)prepareWithError:(NSError * _Nullable * _Nullable)error {
-    os_unfair_lock_lock(&_lock);
-    [self teardownLocked];
+    return [self prepareWithError:error publishedEpoch:NULL];
+}
+
+- (BOOL)prepareWithError:(NSError * _Nullable * _Nullable)error
+          publishedEpoch:(uint64_t * _Nullable)epochOut {
+    if (epochOut != NULL) {
+        *epochOut = 0;
+    }
+
+    __block uint64_t epoch = 0;
+    __block AVAssetReader *retired = nil;
+    [self performOnReaderQueue:^{
+        epoch = ++_prepareGeneration;
+        retired = _reader;
+        [self clearReaderFieldsOnReaderQueue];
+        _lastError = nil;
+    }];
+    // The queue block has finished, so no copyNextSampleBuffer is using this
+    // reader. Cancel outside the queue: cancelReading can re-enter the caller.
+    [retired cancelReading];
+
+    AVURLAsset *asset = nil;
+    AVAssetReader *reader = nil;
+    AVAssetReaderTrackOutput *output = nil;
+    CMTime nominal = CMTimeMake(1, 30);
     NSError *localError = nil;
-    BOOL opened = [self prepareLockedWithError:&localError];
-    if (!opened) {
-        [self teardownLocked];
-        _lastError = localError;
-        if (error != NULL) {
-            *error = localError;
+    BOOL opened = [self buildReaderForFileURL:self.fileURL
+                                       asset:&asset
+                                      reader:&reader
+                                      output:&output
+                             nominalDuration:&nominal
+                                       error:&localError];
+
+    __block BOOL published = NO;
+    [self performOnReaderQueue:^{
+        if (_prepareGeneration != epoch) {
+            // reset, invalidate, or a newer prepare owns the object.
+            return;
         }
-    } else {
+        if (!opened) {
+            _lastError = localError;
+            return;
+        }
+        _asset = asset;
+        _reader = reader;
+        _output = output;
+        _nominalFrameDuration = nominal;
+        _presentationTime = kCMTimeInvalid;
+        _duration = kCMTimeInvalid;
+        _frameIndex = 0;
         _prepared = YES;
         _lastError = nil;
-        if (error != NULL) {
-            *error = nil;
-        }
+        published = YES;
+    }];
+
+    if (!published && reader != nil) {
+        [reader cancelReading];
     }
-    os_unfair_lock_unlock(&_lock);
-    return opened;
+    if (!published) {
+        if (error != NULL) {
+            if (localError != nil) {
+                *error = localError;
+            } else {
+                *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
+                                 description:@"MediaReader prepare was cancelled before the reader was published."
+                                  underlying:nil];
+            }
+        }
+        return NO;
+    }
+    if (epochOut != NULL) {
+        *epochOut = epoch;
+    }
+    if (error != NULL) {
+        *error = nil;
+    }
+    return YES;
+}
+
+- (void)invalidatePublishedEpoch:(uint64_t)epoch {
+    if (epoch == 0) {
+        return;
+    }
+    __block AVAssetReader *retired = nil;
+    [self performOnReaderQueue:^{
+        if (_prepareGeneration != epoch) {
+            return;
+        }
+        retired = _reader;
+        [self clearReaderFieldsOnReaderQueue];
+        _prepareGeneration += 1;
+        _lastError = nil;
+    }];
+    [retired cancelReading];
 }
 
 - (CVPixelBufferRef _Nullable)copyNextPixelBuffer {
-    os_unfair_lock_lock(&_lock);
-    CVPixelBufferRef pixelBuffer = [self copyNextPixelBufferLocked];
-    os_unfair_lock_unlock(&_lock);
+    __block CVPixelBufferRef pixelBuffer = NULL;
+    [self performOnReaderQueue:^{
+        pixelBuffer = [self copyNextPixelBufferOnReaderQueue];
+    }];
     return pixelBuffer;
 }
 
 - (CMTime)presentationTimeOfLastFrame {
-    os_unfair_lock_lock(&_lock);
-    CMTime time = _presentationTime;
-    os_unfair_lock_unlock(&_lock);
+    __block CMTime time = kCMTimeInvalid;
+    [self performOnReaderQueue:^{
+        time = _presentationTime;
+    }];
     return time;
 }
 
 - (CMTime)durationOfLastFrame {
-    os_unfair_lock_lock(&_lock);
-    CMTime time = _duration;
-    os_unfair_lock_unlock(&_lock);
+    __block CMTime time = kCMTimeInvalid;
+    [self performOnReaderQueue:^{
+        time = _duration;
+    }];
     return time;
 }
 
 - (void)reset {
-    os_unfair_lock_lock(&_lock);
-    [self teardownLocked];
-    _lastError = nil;
-    os_unfair_lock_unlock(&_lock);
+    __block AVAssetReader *retired = nil;
+    [self performOnReaderQueue:^{
+        _prepareGeneration += 1;
+        retired = _reader;
+        [self clearReaderFieldsOnReaderQueue];
+        _lastError = nil;
+    }];
+    [retired cancelReading];
 }
 
-#pragma mark - Locked
+#pragma mark - Reader queue
 
-- (void)teardownLocked {
-    [_reader cancelReading];
+- (void)clearReaderFieldsOnReaderQueue {
     _reader = nil;
     _output = nil;
     _asset = nil;
@@ -154,8 +257,63 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     _frameIndex = 0;
 }
 
-- (BOOL)prepareLockedWithError:(NSError * _Nullable * _Nullable)error {
-    NSURL *fileURL = self.fileURL;
+- (BOOL)loadVideoTracksForAsset:(AVURLAsset *)asset
+                         tracks:(NSArray<AVAssetTrack *> * _Nullable * _Nonnull)tracksOut
+                          error:(NSError * _Nullable * _Nullable)error {
+    // Waiting on the main thread for loadTracksWithMediaType's completion
+    // deadlocks when that completion needs the main thread (Camera calls
+    // startRunning there). The synchronous API does the load inline.
+    if ([NSThread isMainThread]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+#pragma clang diagnostic pop
+        if (tracksOut != NULL) {
+            *tracksOut = tracks;
+        }
+        return YES;
+    }
+
+    dispatch_semaphore_t tracksLoaded = dispatch_semaphore_create(0);
+    __block NSArray<AVAssetTrack *> *videoTracks = nil;
+    __block NSError *tracksError = nil;
+    [asset loadTracksWithMediaType:AVMediaTypeVideo
+                 completionHandler:^(NSArray<AVAssetTrack *> *_Nullable tracks,
+                                     NSError *_Nullable loadError) {
+        videoTracks = tracks;
+        tracksError = loadError;
+        dispatch_semaphore_signal(tracksLoaded);
+    }];
+    dispatch_semaphore_wait(tracksLoaded, DISPATCH_TIME_FOREVER);
+    if (tracksError != nil) {
+        if (error != NULL) {
+            *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
+                             description:@"Could not load tracks for the media file."
+                              underlying:tracksError];
+        }
+        return NO;
+    }
+    if (tracksOut != NULL) {
+        *tracksOut = videoTracks;
+    }
+    return YES;
+}
+
+- (BOOL)buildReaderForFileURL:(NSURL *)fileURL
+                        asset:(AVURLAsset * _Nullable * _Nonnull)assetOut
+                       reader:(AVAssetReader * _Nullable * _Nonnull)readerOut
+                       output:(AVAssetReaderTrackOutput * _Nullable * _Nonnull)outputOut
+              nominalDuration:(CMTime *)nominalOut
+                        error:(NSError * _Nullable * _Nullable)error {
+    if (assetOut != NULL) {
+        *assetOut = nil;
+    }
+    if (readerOut != NULL) {
+        *readerOut = nil;
+    }
+    if (outputOut != NULL) {
+        *outputOut = nil;
+    }
     if (fileURL == nil || !fileURL.isFileURL || fileURL.path.length == 0) {
         if (error != NULL) {
             *error = [self errorWithCode:MyVCamMediaReaderErrorCodeInvalidURL
@@ -177,27 +335,8 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
     }
 
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:fileURL options:nil];
-    // iPhoneOS 16.5 has no -loadValuesSynchronouslyForKeys:. This is the
-    // supported iOS 15+ tracks load; prepare stays synchronous by waiting.
-    // The handler must not need _lock. Do not pump this thread's run loop
-    // while _lock is held: os_unfair_lock is not recursive.
-    dispatch_semaphore_t tracksLoaded = dispatch_semaphore_create(0);
-    __block NSArray<AVAssetTrack *> *videoTracks = nil;
-    __block NSError *tracksError = nil;
-    [asset loadTracksWithMediaType:AVMediaTypeVideo
-                 completionHandler:^(NSArray<AVAssetTrack *> *_Nullable tracks,
-                                     NSError *_Nullable loadError) {
-        videoTracks = tracks;
-        tracksError = loadError;
-        dispatch_semaphore_signal(tracksLoaded);
-    }];
-    dispatch_semaphore_wait(tracksLoaded, DISPATCH_TIME_FOREVER);
-    if (tracksError != nil) {
-        if (error != NULL) {
-            *error = [self errorWithCode:MyVCamMediaReaderErrorCodeReaderFailed
-                             description:@"Could not load tracks for the media file."
-                              underlying:tracksError];
-        }
+    NSArray<AVAssetTrack *> *videoTracks = nil;
+    if (![self loadVideoTracksForAsset:asset tracks:&videoTracks error:error]) {
         return NO;
     }
 
@@ -211,11 +350,13 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
         return NO;
     }
 
+    CMTime nominal = CMTimeMake(1, 30);
     float framesPerSecond = track.nominalFrameRate;
     if (framesPerSecond > 1.0f) {
-        _nominalFrameDuration = CMTimeMakeWithSeconds(1.0 / (Float64)framesPerSecond, 600);
-    } else {
-        _nominalFrameDuration = CMTimeMake(1, 30);
+        nominal = CMTimeMakeWithSeconds(1.0 / (Float64)framesPerSecond, 600);
+    }
+    if (nominalOut != NULL) {
+        *nominalOut = nominal;
     }
 
     NSError *readerError = nil;
@@ -229,8 +370,12 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
         return NO;
     }
 
+    // IOSurface-backed buffers can be wrapped into a sample Camera will accept.
+    // A CPU-only buffer is a common first-frame crash once it is substituted.
     NSDictionary *settings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
     AVAssetReaderTrackOutput *output =
         [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:settings];
@@ -257,16 +402,19 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
         return NO;
     }
 
-    _asset = asset;
-    _reader = reader;
-    _output = output;
-    _presentationTime = kCMTimeInvalid;
-    _duration = kCMTimeInvalid;
-    _frameIndex = 0;
+    if (assetOut != NULL) {
+        *assetOut = asset;
+    }
+    if (readerOut != NULL) {
+        *readerOut = reader;
+    }
+    if (outputOut != NULL) {
+        *outputOut = output;
+    }
     return YES;
 }
 
-- (void)recordNonReadingStatusLocked {
+- (void)recordNonReadingStatusOnReaderQueue {
     AVAssetReaderStatus status = _reader.status;
     if (status == AVAssetReaderStatusCompleted) {
         _lastError = nil;
@@ -285,7 +433,7 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
                           underlying:_reader.error];
 }
 
-- (CVPixelBufferRef _Nullable)copyNextPixelBufferLocked {
+- (CVPixelBufferRef _Nullable)copyNextPixelBufferOnReaderQueue {
     if (!_prepared || _reader == nil || _output == nil) {
         // NULL without an error would look like end of media.
         _lastError = [self errorWithCode:MyVCamMediaReaderErrorCodeNotPrepared
@@ -294,7 +442,7 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
         return NULL;
     }
     if (_reader.status != AVAssetReaderStatusReading) {
-        [self recordNonReadingStatusLocked];
+        [self recordNonReadingStatusOnReaderQueue];
         return NULL;
     }
 
@@ -303,7 +451,7 @@ NSString * const MyVCamMediaReaderErrorDomain = @"MyVCamMediaReaderErrorDomain";
         if (_reader.status == AVAssetReaderStatusReading) {
             _lastError = nil;
         } else {
-            [self recordNonReadingStatusLocked];
+            [self recordNonReadingStatusOnReaderQueue];
         }
         return NULL;
     }

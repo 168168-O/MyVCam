@@ -27,7 +27,8 @@
 //    inject, and stop. It does not report inject success when the injector
 //    returns NO.
 //  - mediaserverd / BWNodeOutput is not a path on this type.
-//  - This type's state lock is the outer lock. The reader and the injector
+//  - This type's state lock is the outer lock. It is not held across
+//    MediaReader or other AVFoundation calls. The reader and the injector
 //    take their own locks and must not call back into this type.
 //  - Do not dispatch_sync onto com.myvcam.feed while holding the state lock.
 //    The feed timer is cancelled from other queues without waiting for it.
@@ -149,8 +150,9 @@ typedef NS_ENUM(NSInteger, MyVCamManagerErrorCode) {
 /// End of media is NO with EndOfMedia. Producer failures are returned as-is.
 /// The C1-C feed calls this from `com.myvcam.feed`. A direct call still pulls
 /// one frame and shares the state lock with the feed.
-/// Uses the private locked producer. Calling the public copy method under the
-/// state lock would deadlock.
+/// Decode runs without the state lock. The inject retain is committed while
+/// the lock is held so stop cannot free _latest in the middle of that retain.
+/// Do not call this method while already holding the state lock.
 - (BOOL)injectNextSampleBufferWithError:(NSError * _Nullable * _Nullable)error;
 
 @end
