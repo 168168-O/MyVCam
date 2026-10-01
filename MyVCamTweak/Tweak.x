@@ -71,8 +71,7 @@ static const char kMyVCamC1CPrefix[] = "[MyVCam C1-C]";
 static const char kMyVCamDisablePath[] = "/var/mobile/Documents/MyVCam/disable";
 /// Successful delegate callbacks before the feed or a replacement is allowed.
 static const uint32_t kMyVCamPassthroughBeforeReplace = 30;
-static const int kMyVCamHandoffCount = 8;
-_Static_assert(kMyVCamHandoffCount == 8, "gHandoff length");
+#define kMyVCamHandoffCount 8
 static const int64_t kMyVCamMatchIntervalNanoseconds = (int64_t)(NSEC_PER_SEC / 30);
 static BOOL gC1BLoggedPassThrough = NO;
 static BOOL gC1BLoggedReplace = NO;
@@ -80,7 +79,7 @@ static BOOL gCaptureSessionRunning = NO;
 static uint64_t gSessionGeneration = 0;
 static MyVCamPhase gPhase = MyVCamPhaseWarmup;
 static uint32_t gPassthroughCount = 0;
-static CMSampleBufferRef gHandoff[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+static CMSampleBufferRef gHandoff[kMyVCamHandoffCount] = {0};
 static CMSampleBufferRef gPublished = NULL;
 static uint64_t gPublishedGeneration = 0;
 static CMSampleBufferRef gOrigin = NULL;
