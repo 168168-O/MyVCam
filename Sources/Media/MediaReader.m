@@ -35,7 +35,7 @@
 #import <sys/stat.h>
 #import <unistd.h>
 
-static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.12]";
+static const char kMyVCamDiagPrefix[] = "[MyVCam 0.2.13]";
 
 static const char *MyVCamReaderStatusName(BOOL created, AVAssetReaderStatus status) {
     if (!created) {
