@@ -257,8 +257,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.13' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.13" >&2
+          if ! grep -q '^Version: 0.2.14' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.14" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"
@@ -273,6 +273,14 @@ jobs:
           fi
           if ! grep -q '<string>com.apple.camera</string>' "${plists[0]}"; then
             echo "packaged filter is not com.apple.camera" >&2
+            exit 1
+          fi
+          if ! grep -q '<key>Executables</key>' "${plists[0]}"; then
+            echo "packaged filter is missing Executables" >&2
+            exit 1
+          fi
+          if ! grep -q '<string>Camera</string>' "${plists[0]}"; then
+            echo "packaged filter is missing executable Camera" >&2
             exit 1
           fi
           if grep -q 'com.myvcam.stage21.placeholder' "${plists[0]}"; then

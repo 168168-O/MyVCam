@@ -52,7 +52,8 @@
 //  /var/jb/var/mobile/Library/MyVCam/runtime.status so Filza can show ctor,
 //  feed, slot, and enqueue state without Console.
 //
-//  MyVCamTweak.plist matches com.apple.camera only. The dylib is arm64 only.
+//  MyVCamTweak.plist matches bundle com.apple.camera and executable Camera.
+//  The dylib is arm64 only.
 //
 
 #import <AVFoundation/AVFoundation.h>
@@ -115,6 +116,7 @@ static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
 static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static const char kMyVCamRuntimeStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
+static const char kMyVCamStatusVersion[] = "0.2.14";
 static NSString * const kMyVCamPreviewOverlayName = @"MyVCam.preview";
 #define kMyVCamHandoffCount 8
 static const int64_t kMyVCamMatchIntervalNanoseconds = (int64_t)(NSEC_PER_SEC / 30);
@@ -894,7 +896,8 @@ static void MyVCamStatus_Format(char *line, size_t size) {
     }
     snprintf(line,
              size,
-             "version=0.2.13 ctor=%d init=%d phase=%s session=%d feed_errno=%d prepare=%d path=%s err=%s windows=%d layers=%d host=%s host_layer=%d above=%s container=%s slot=%s in_window=%d frame=%s live_hidden=%d superlayer=%d conn=%d enqueue=%d reason=%s px=%dx%d host_cover=%d blocks=%u detaches=%u write=%s write_errno=%d hierarchy=%s\n",
+             "version=%s ctor=%d init=%d phase=%s session=%d feed_errno=%d prepare=%d path=%s err=%s windows=%d layers=%d host=%s host_layer=%d above=%s container=%s slot=%s in_window=%d frame=%s live_hidden=%d superlayer=%d conn=%d enqueue=%d reason=%s px=%dx%d host_cover=%d blocks=%u detaches=%u write=%s write_errno=%d hierarchy=%s\n",
+             kMyVCamStatusVersion,
              ctor,
              initFlag,
              phaseName,
@@ -3611,10 +3614,12 @@ static BOOL MyVCamPreview_ShouldKeepDetached(CALayer *layer) {
 %end
 
 %ctor {
-    MyVCamC1A_InitState();
-    // Before %init. A dylib that maps and then dies in the hook installer
-    // still leaves ctor=1 init=0 in runtime.status.
+    // First, before InitState and %init. Mach-O ignores constructor
+    // priority, so this is the earliest reliable write. A dylib that maps
+    // and then dies in InitState or the hook installer still leaves
+    // ctor=1 init=0 in runtime.status.
     MyVCamStatus_Mark(1, 0);
+    MyVCamC1A_InitState();
     dispatch_async(dispatch_get_main_queue(), ^{
         %init;
         NSLog(@"%s init runs=1", kMyVCamDiagPrefix);
