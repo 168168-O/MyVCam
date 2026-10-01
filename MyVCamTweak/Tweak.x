@@ -51,7 +51,6 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
-#import <IOSurface/IOSurface.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -1532,10 +1531,6 @@ static CVPixelBufferRef MyVCamPreview_CreateIOSurfaceBGRA(size_t width, size_t h
 static BOOL MyVCamPreview_CopyBGRA(CVPixelBufferRef source, CVPixelBufferRef destination) {
     CVReturn sourceLock = CVPixelBufferLockBaseAddress(source, kCVPixelBufferLock_ReadOnly);
     CVReturn destinationLock = CVPixelBufferLockBaseAddress(destination, 0);
-    IOSurfaceRef sourceSurface = NULL;
-    IOSurfaceRef destinationSurface = NULL;
-    BOOL sourceSurfaceLocked = NO;
-    BOOL destinationSurfaceLocked = NO;
     BOOL copied = NO;
     if (sourceLock == kCVReturnSuccess && destinationLock == kCVReturnSuccess) {
         uint8_t *sourceBase = CVPixelBufferGetBaseAddress(source);
@@ -1544,27 +1539,6 @@ static BOOL MyVCamPreview_CopyBGRA(CVPixelBufferRef source, CVPixelBufferRef des
         size_t height = CVPixelBufferGetHeight(destination);
         size_t sourceRow = CVPixelBufferGetBytesPerRow(source);
         size_t destinationRow = CVPixelBufferGetBytesPerRow(destination);
-        // Some IOSurface-backed reader buffers stay NULL from GetBaseAddress
-        // until the surface itself is locked. A failed copy never enqueues,
-        // so the cover stays black or the live image shows through.
-        if (sourceBase == NULL) {
-            sourceSurface = CVPixelBufferGetIOSurface(source);
-            if (sourceSurface != NULL &&
-                IOSurfaceLock(sourceSurface, kIOSurfaceLockReadOnly, NULL) == kIOReturnSuccess) {
-                sourceSurfaceLocked = YES;
-                sourceBase = IOSurfaceGetBaseAddress(sourceSurface);
-                sourceRow = IOSurfaceGetBytesPerRow(sourceSurface);
-            }
-        }
-        if (destinationBase == NULL) {
-            destinationSurface = CVPixelBufferGetIOSurface(destination);
-            if (destinationSurface != NULL &&
-                IOSurfaceLock(destinationSurface, 0, NULL) == kIOReturnSuccess) {
-                destinationSurfaceLocked = YES;
-                destinationBase = IOSurfaceGetBaseAddress(destinationSurface);
-                destinationRow = IOSurfaceGetBytesPerRow(destinationSurface);
-            }
-        }
         size_t rowBytes = width * 4u;
         if (sourceBase != NULL && destinationBase != NULL &&
             height > 0 && rowBytes > 0 &&
@@ -1576,12 +1550,6 @@ static BOOL MyVCamPreview_CopyBGRA(CVPixelBufferRef source, CVPixelBufferRef des
             }
             copied = YES;
         }
-    }
-    if (destinationSurfaceLocked && destinationSurface != NULL) {
-        IOSurfaceUnlock(destinationSurface, 0, NULL);
-    }
-    if (sourceSurfaceLocked && sourceSurface != NULL) {
-        IOSurfaceUnlock(sourceSurface, kIOSurfaceLockReadOnly, NULL);
     }
     if (destinationLock == kCVReturnSuccess) {
         CVPixelBufferUnlockBaseAddress(destination, 0);
