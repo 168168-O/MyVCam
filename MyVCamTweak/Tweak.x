@@ -851,8 +851,22 @@ static void MyVCamPreview_ScanLayer(CALayer *layer) {
 }
 
 static void MyVCamPreview_ScanWindows(void) {
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
-        MyVCamPreview_ScanLayer(window.layer);
+    // UIApplication.windows is deprecated in the iOS 15 SDK and Theos builds
+    // with -Werror. UIWindowScene.windows is the replacement and exists on
+    // iOS 15.3.1.
+    UIApplication *application = [UIApplication sharedApplication];
+    for (UIScene *scene in application.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        NSArray<UIWindow *> *windows = windowScene.windows;
+#pragma clang diagnostic pop
+        for (UIWindow *window in windows) {
+            MyVCamPreview_ScanLayer(window.layer);
+        }
     }
 }
 
