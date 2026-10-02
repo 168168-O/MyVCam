@@ -36,6 +36,7 @@ rm -f /var/jb/var/mobile/Library/MyVCam/test.mp4 \
     /var/jb/var/mobile/Library/MyVCam/container.path \
     /var/jb/var/mobile/Library/MyVCam/postinst.log \
     /var/jb/var/mobile/Library/MyVCam/package.installed \
+    /var/jb/var/mobile/Library/MyVCam/runtime.status \
     /var/tmp/myvcam-runtime.status
 
 exit 0

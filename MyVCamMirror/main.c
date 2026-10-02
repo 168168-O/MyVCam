@@ -630,10 +630,225 @@ done:
     }
 }
 
+static unsigned myvcam_be32(const unsigned char *bytes) {
+    return ((unsigned)bytes[0] << 24) | ((unsigned)bytes[1] << 16) |
+           ((unsigned)bytes[2] << 8) | (unsigned)bytes[3];
+}
+
+static unsigned myvcam_le32(const unsigned char *bytes) {
+    return (unsigned)bytes[0] | ((unsigned)bytes[1] << 8) |
+           ((unsigned)bytes[2] << 16) | ((unsigned)bytes[3] << 24);
+}
+
+/* One slice of the installed tweak. Prints nothing on failure. */
+static int myvcam_slice_info(const unsigned char *base,
+                             size_t size,
+                             char *arch,
+                             size_t archLength,
+                             unsigned *pageShift,
+                             unsigned *sigFlags,
+                             int *hasUuid) {
+    size_t off = 32;
+    unsigned ncmds = 0;
+    unsigned subtype = 0;
+    unsigned low = 0;
+    const char *name = NULL;
+
+    if (base == NULL || size < 32 || arch == NULL || archLength < 8) {
+        return 0;
+    }
+    if (myvcam_le32(base) != 0xFEEDFACFu) {
+        return 0;
+    }
+    if (myvcam_le32(base + 4) != 0x0100000Cu) {
+        return 0;
+    }
+    subtype = myvcam_le32(base + 8);
+    ncmds = myvcam_le32(base + 16);
+    low = subtype & 0xffu;
+    if (low == 0) {
+        name = "arm64";
+    } else if (low == 2) {
+        name = "arm64e";
+    } else {
+        name = "other";
+    }
+    if ((size_t)snprintf(arch, archLength, "%s:0x%x", name, subtype) >= archLength) {
+        return 0;
+    }
+    *pageShift = 0;
+    *sigFlags = 0;
+    *hasUuid = 0;
+    for (unsigned index = 0; index < ncmds; index++) {
+        unsigned cmd = 0;
+        unsigned cmdsize = 0;
+        if (off + 8 > size) {
+            return 0;
+        }
+        cmd = myvcam_le32(base + off);
+        cmdsize = myvcam_le32(base + off + 4);
+        if (cmdsize < 8 || off + cmdsize > size) {
+            return 0;
+        }
+        if (cmd == 0x1bu && cmdsize >= 24) {
+            *hasUuid = 1;
+        } else if (cmd == 0x1du && cmdsize >= 16) {
+            unsigned dataoff = myvcam_le32(base + off + 8);
+            unsigned datasize = myvcam_le32(base + off + 12);
+            if ((size_t)dataoff + 12 <= size && (size_t)dataoff + datasize <= size) {
+                const unsigned char *blob = base + dataoff;
+                unsigned count = 0;
+                if (myvcam_be32(blob) == 0xFADE0CC0u) {
+                    count = myvcam_be32(blob + 8);
+                    for (unsigned slot = 0; slot < count; slot++) {
+                        unsigned typ = 0;
+                        unsigned rel = 0;
+                        if (12u + (slot + 1u) * 8u > datasize) {
+                            break;
+                        }
+                        typ = myvcam_be32(blob + 12 + slot * 8);
+                        rel = myvcam_be32(blob + 16 + slot * 8);
+                        if (typ == 0 && rel + 40 <= datasize) {
+                            const unsigned char *directory = blob + rel;
+                            if (myvcam_be32(directory) == 0xFADE0C02u) {
+                                *sigFlags = myvcam_be32(directory + 12);
+                                *pageShift = directory[39];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        off += cmdsize;
+    }
+    return 1;
+}
+
+/* --machinfo <dylib> writes one line for package.installed. Not runtime.status. */
+static int myvcam_machinfo(const char *path) {
+    int fd = -1;
+    struct stat info;
+    unsigned char *buf = NULL;
+    size_t size = 0;
+    ssize_t got = 0;
+    char parts[4][64];
+    int count = 0;
+    unsigned pageShift = 0;
+    unsigned sigFlags = 0;
+    int hasUuid = 1;
+    int saw = 0;
+
+    if (path == NULL || path[0] == '\0') {
+        return 1;
+    }
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return 1;
+    }
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 ||
+        info.st_size > (8 * 1024 * 1024)) {
+        close(fd);
+        return 1;
+    }
+    size = (size_t)info.st_size;
+    buf = malloc(size);
+    if (buf == NULL) {
+        close(fd);
+        return 1;
+    }
+    got = 0;
+    while ((size_t)got < size) {
+        ssize_t step = read(fd, buf + got, size - (size_t)got);
+        if (step < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(buf);
+            close(fd);
+            return 1;
+        }
+        if (step == 0) {
+            break;
+        }
+        got += step;
+    }
+    close(fd);
+    if ((size_t)got != size) {
+        free(buf);
+        return 1;
+    }
+
+    if (size >= 8 && myvcam_be32(buf) == 0xCAFEBABEu) {
+        unsigned nfat = myvcam_be32(buf + 4);
+        if (nfat == 0 || nfat > 4) {
+            free(buf);
+            return 1;
+        }
+        for (unsigned index = 0; index < nfat; index++) {
+            unsigned offset = 0;
+            unsigned sliceSize = 0;
+            unsigned slicePage = 0;
+            unsigned sliceFlags = 0;
+            int sliceUuid = 0;
+            if (8u + (index + 1u) * 20u > size) {
+                free(buf);
+                return 1;
+            }
+            offset = myvcam_be32(buf + 8 + index * 20 + 8);
+            sliceSize = myvcam_be32(buf + 8 + index * 20 + 12);
+            if ((size_t)offset + sliceSize > size) {
+                free(buf);
+                return 1;
+            }
+            if (!myvcam_slice_info(buf + offset, sliceSize, parts[count], sizeof(parts[count]),
+                                   &slicePage, &sliceFlags, &sliceUuid)) {
+                free(buf);
+                return 1;
+            }
+            if (!saw || (parts[count][0] == 'a' && strstr(parts[count], "arm64e") == parts[count])) {
+                pageShift = slicePage;
+                sigFlags = sliceFlags;
+            }
+            if (!sliceUuid) {
+                hasUuid = 0;
+            }
+            saw = 1;
+            count++;
+            if (count == 4) {
+                break;
+            }
+        }
+    } else {
+        if (!myvcam_slice_info(buf, size, parts[0], sizeof(parts[0]), &pageShift, &sigFlags, &hasUuid)) {
+            free(buf);
+            return 1;
+        }
+        count = 1;
+        saw = 1;
+    }
+    free(buf);
+    if (!saw || count == 0 || pageShift == 0) {
+        return 1;
+    }
+    printf("mach=%s", parts[0]);
+    for (int index = 1; index < count; index++) {
+        printf("+%s", parts[index]);
+    }
+    printf(" pagesz=%u sig=0x%x uuid=%d\n",
+           (pageShift < 31) ? (1u << pageShift) : 0u,
+           sigFlags,
+           hasUuid ? 1 : 0);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int watch = 0;
 
     for (int index = 1; index < argc; index++) {
+        if (strcmp(argv[index], "--machinfo") == 0) {
+            const char *target = (index + 1 < argc) ? argv[index + 1] : NULL;
+            return myvcam_machinfo(target);
+        }
         if (strcmp(argv[index], "--watch") == 0) {
             watch = 1;
         }

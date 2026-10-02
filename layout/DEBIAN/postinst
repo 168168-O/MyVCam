@@ -13,12 +13,6 @@ LAUNCHCTL=""
 
 mkdir -p "$LOGDIR"
 chmod 0755 "$LOGDIR" 2>/dev/null || true
-# Camera can write this file without directory write permission. Filza reads it.
-if [ ! -f "$LOGDIR/runtime.status" ]; then
-    : > "$LOGDIR/runtime.status" || true
-fi
-chmod 0666 "$LOGDIR/runtime.status" 2>/dev/null || true
-chown mobile:mobile "$LOGDIR/runtime.status" 2>/dev/null || true
 
 if [ -f "$MIRROR" ]; then
     chown root:wheel "$MIRROR" 2>/dev/null || true
@@ -56,17 +50,28 @@ fi
 
 chmod 0644 "$LOG" 2>/dev/null || true
 
+# Drop a stale runtime.status from a previous install. postinst used to
+# create that file only when it was missing, so a 0-byte file kept its old
+# mtime after a clean reinstall and looked like this build had been mapped.
+# The mirror runs above and may republish a container copy; truncate after it.
+# This file is still not package.installed.
+mkdir -p "$LOGDIR"
+: >"$LOGDIR/runtime.status" || true
+chmod 0666 "$LOGDIR/runtime.status" 2>/dev/null || true
+chown mobile:mobile "$LOGDIR/runtime.status" 2>/dev/null || true
+
 # Separate from runtime.status. A 0-byte runtime.status does not mean
 # this package failed to install. exit=0 is this script's exit status.
-# substrate/framework/tweak_inject/dynamic_libs are root-visible install
-# facts. They do not mean the dylib was mapped into a process.
-mkdir -p "$LOGDIR"
+# substrate/framework/tweak_inject/dynamic_libs/plist_inject/eksafemode/mach
+# are root-visible install facts. They do not mean the dylib was mapped.
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
 euid=$(id -u 2>/dev/null || echo unknown)
 substr=0
 fw=0
 inj=0
 dyn=0
+plist_inj=0
+safe=0
 if [ -e /var/jb/usr/lib/libsubstrate.dylib ]; then
     substr=1
 fi
@@ -79,7 +84,24 @@ fi
 if [ -e /var/jb/Library/MobileSubstrate/DynamicLibraries/MyVCamTweak.dylib ]; then
     dyn=1
 fi
-printf 'version=0.2.17 timestamp=%s exit=0 euid=%s substrate=%s framework=%s tweak_inject=%s dynamic_libs=%s\n' \
-    "$ts" "$euid" "$substr" "$fw" "$inj" "$dyn" >"$MARK" || true
+if [ -f /var/jb/usr/lib/TweakInject/MyVCamTweak.plist ]; then
+    plist_inj=1
+fi
+# ElleKit skips every tweak, including ones that already work, when this exists.
+if [ -f /var/mobile/.eksafemode ]; then
+    safe=1
+fi
+mach_line="mach=fail"
+if [ -x "$MIRROR" ]; then
+    probed=$("$MIRROR" --machinfo /var/jb/usr/lib/TweakInject/MyVCamTweak.dylib 2>/dev/null || true)
+    if [ -z "$probed" ]; then
+        probed=$("$MIRROR" --machinfo /var/jb/Library/MobileSubstrate/DynamicLibraries/MyVCamTweak.dylib 2>/dev/null || true)
+    fi
+    case "$probed" in
+        mach=*) mach_line=$probed ;;
+    esac
+fi
+printf 'version=0.2.18 timestamp=%s exit=0 euid=%s substrate=%s framework=%s tweak_inject=%s dynamic_libs=%s plist_inject=%s eksafemode=%s %s\n' \
+    "$ts" "$euid" "$substr" "$fw" "$inj" "$dyn" "$plist_inj" "$safe" "$mach_line" >"$MARK" || true
 chmod 0644 "$MARK" 2>/dev/null || true
 exit 0

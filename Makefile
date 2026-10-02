@@ -9,6 +9,11 @@
 
 export THEOS_PACKAGE_SCHEME = rootless
 
+# The aggregate has no sources. Without a deployment target, Theos defaults
+# to iOS 9 and warns that this clang cannot build arm64e for that OS.
+# Subprojects set their own ARCHS. The tweak is arm64 and arm64e.
+TARGET := iphone:clang:latest:15.0
+
 include $(THEOS)/makefiles/common.mk
 
 SUBPROJECTS += MyVCamTweak

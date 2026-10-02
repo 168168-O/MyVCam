@@ -7,12 +7,13 @@
 # SpringBoard and Preferences are load witnesses. Hooks stay in Camera.
 #
 
-# arm64 only. iPhone 12 is arm64e, and the Linux Theos clang emits an arm64e
-# slice with an incompatible pointer-auth ABI (ld warns at link). dyld prefers
-# that slice and Camera dies on the first authenticated call, before any feed
-# runs. ElleKit on Dopamine loads an arm64 tweak into an arm64e process.
-# Do not add arm64e back while Actions uses this toolchain.
-ARCHS := arm64
+# iPhone 12 is arm64e. dyld does not map an arm64 dylib into an arm64e
+# process, so an arm64-only tweak never runs a constructor. ElleKit dlopens
+# this file and ignores the architecture error. arm64e must be the versioned
+# pointer-auth ABI (cpusubtype 0x80000002). The 2023 Linux clang emitted an
+# ABI that crashed on the first authenticated call; Actions pins the current
+# Theos clang, and tools/finalize_load.py refuses a slice without that bit.
+ARCHS := arm64 arm64e
 TARGET := iphone:clang:latest:15.0
 
 export THEOS_PACKAGE_SCHEME = rootless

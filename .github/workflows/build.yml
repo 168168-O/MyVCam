@@ -15,7 +15,9 @@ permissions:
 jobs:
   compile:
     name: Theos rootless compile and package
-    runs-on: ubuntu-22.04
+    # ubuntu-22.04 glibc is older than 2.38. The pinned clang (libLLVM 19)
+    # will not start there, so the arm64e slice never builds. 24.04 has 2.39.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,6 +25,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
+          # libtinfo5 is not in Ubuntu 24.04. Clang 19 links libtinfo.so.6.
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             ca-certificates \
@@ -30,7 +33,6 @@ jobs:
             dpkg \
             fakeroot \
             git \
-            libtinfo5 \
             libtinfo6 \
             perl \
             rsync \
@@ -67,8 +69,13 @@ jobs:
               exit 1
               ;;
           esac
+          # Current Theos Linux clang (install-theos uses releases/latest of this
+          # project). test-210562a (2023-09) emitted an arm64e ABI that crashes
+          # on iOS 15, which is why 0.2.17 shipped arm64 only. dyld will not
+          # map that slice into an arm64e process. This clang emits cpusubtype
+          # 0x80000002 (pacibsp/retab), the ABI iOS 15.3 loads.
           curl -fsSL -o "${RUNNER_TEMP}/toolchain.tar.xz" \
-            "https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/${asset}"
+            "https://github.com/L1ghtmann/llvm-project/releases/download/main-update_3-eabca92/${asset}"
           tar -xJf "${RUNNER_TEMP}/toolchain.tar.xz" -C "$THEOS/toolchain"
           clang="$THEOS/toolchain/linux/iphone/bin/clang"
           if [[ ! -x "$clang" ]]; then
@@ -77,6 +84,10 @@ jobs:
             exit 1
           fi
           "$clang" --version
+          if ! "$clang" --version | grep -F 'eabca92703dccee96288019c774756d2a33522ee'; then
+            echo "iOS clang is not the pinned eabca92 toolchain" >&2
+            exit 1
+          fi
 
       - name: Install ldid
         run: |
@@ -132,10 +143,11 @@ jobs:
             echo "merged dylib is missing arm64: ${archs}" >&2
             exit 1
           fi
-          # iPhone 12 loads arm64e when that slice exists. The Linux toolchain's
-          # arm64e ABI is incompatible and aborts Camera at the first call.
-          if [[ "$archs" =~ (^|[^[:alnum:]_])arm64e([^[:alnum:]_]|$) ]]; then
-            echo "merged dylib must not contain arm64e: ${archs}" >&2
+          # iPhone 12 is arm64e. An arm64-only slice is never mapped, so the
+          # constructor cannot run. arm64e must be present; finalize_load.py
+          # rejects the pre-iOS 14 ABI (cpusubtype without 0x80000000).
+          if [[ ! "$archs" =~ (^|[^[:alnum:]_])arm64e([^[:alnum:]_]|$) ]]; then
+            echo "merged dylib is missing arm64e: ${archs}" >&2
             exit 1
           fi
           for class_name in MyVCamManager MediaReader SampleBufferBuilder VideoInjector MyVCamFrame; do
@@ -208,8 +220,8 @@ jobs:
             echo "merged dylib is missing runtime.status" >&2
             exit 1
           fi
-          if ! grep -a -F '0.2.17' "$merged"; then
-            echo "merged dylib is missing the 0.2.17 status version" >&2
+          if ! grep -a -F '0.2.18' "$merged"; then
+            echo "merged dylib is missing the 0.2.18 status version" >&2
             exit 1
           fi
           if ! grep -a -F 'early=1' "$merged"; then
@@ -224,7 +236,7 @@ jobs:
             echo "merged dylib is missing the /var/tmp load witness" >&2
             exit 1
           fi
-          python3 tools/finalize_load.py --verify "$merged"
+          python3 tools/finalize_load.py --verify --require-arm64e "$merged"
           mapfile -t mirrors_built < <(find .theos -path '*.dSYM' -prune -o -name myvcam-mirror -type f -print)
           if [[ ${#mirrors_built[@]} -eq 0 ]]; then
             echo "make finished without myvcam-mirror" >&2
@@ -310,12 +322,12 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.17' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.17" >&2
+          if ! grep -q '^Version: 0.2.18' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.18" >&2
             exit 1
           fi
           deb_base="$(basename "${packaged[0]}")"
-          if [[ "$deb_base" != "com.myvcam.tweak_0.2.17-1+debug_iphoneos-arm64.deb" ]]; then
+          if [[ "$deb_base" != "com.myvcam.tweak_0.2.18-1+debug_iphoneos-arm64.deb" ]]; then
             echo "unexpected deb filename: ${deb_base}" >&2
             exit 1
           fi
@@ -400,8 +412,8 @@ jobs:
             echo "packaged prerm does not match layout/DEBIAN/prerm" >&2
             exit 1
           fi
-          if ! grep -F 'version=0.2.17' "$control_dir/postinst"; then
-            echo "postinst is missing version=0.2.17" >&2
+          if ! grep -F 'version=0.2.18' "$control_dir/postinst"; then
+            echo "postinst is missing version=0.2.18" >&2
             exit 1
           fi
           if ! grep -F 'substrate=' "$control_dir/postinst"; then
@@ -418,6 +430,22 @@ jobs:
           fi
           if ! grep -F 'dynamic_libs=' "$control_dir/postinst"; then
             echo "postinst is missing dynamic_libs=" >&2
+            exit 1
+          fi
+          if ! grep -F 'plist_inject=' "$control_dir/postinst"; then
+            echo "postinst is missing plist_inject=" >&2
+            exit 1
+          fi
+          if ! grep -F 'eksafemode=' "$control_dir/postinst"; then
+            echo "postinst is missing eksafemode=" >&2
+            exit 1
+          fi
+          if ! grep -F 'mach=' "$control_dir/postinst"; then
+            echo "postinst is missing mach=" >&2
+            exit 1
+          fi
+          if ! grep -F ': >"$LOGDIR/runtime.status"' "$control_dir/postinst"; then
+            echo "postinst does not overwrite runtime.status" >&2
             exit 1
           fi
           if ! grep -F 'timestamp=' "$control_dir/postinst"; then
@@ -448,6 +476,10 @@ jobs:
             echo "prerm does not remove the /var/tmp load witness" >&2
             exit 1
           fi
+          if ! grep -F '/var/jb/var/mobile/Library/MyVCam/runtime.status' "$control_dir/prerm"; then
+            echo "prerm does not remove runtime.status" >&2
+            exit 1
+          fi
           if find "$extracted" -name 'package.installed' -print | grep -q .; then
             echo "deb data archive must not ship package.installed; postinst creates it" >&2
             exit 1
@@ -458,7 +490,8 @@ jobs:
             echo "deb layout is missing myvcam-mirror or its launch daemon" >&2
             exit 1
           fi
-          python3 tools/finalize_load.py --verify "${dylibs[0]}" "${mirrors[0]}"
+          python3 tools/finalize_load.py --verify --require-arm64e "${dylibs[0]}"
+          python3 tools/finalize_load.py --verify "${mirrors[0]}"
           lipo_bin=""
           for candidate in lipo llvm-lipo; do
             if [[ -x "$THEOS/toolchain/linux/iphone/bin/$candidate" ]]; then
@@ -486,6 +519,10 @@ jobs:
           fi
           if ! grep -a -F -- '--watch' "${mirrors[0]}"; then
             echo "myvcam-mirror is missing --watch" >&2
+            exit 1
+          fi
+          if ! grep -a -F -- '--machinfo' "${mirrors[0]}"; then
+            echo "myvcam-mirror is missing --machinfo" >&2
             exit 1
           fi
           if ! grep -a -F 'com.apple.camera' "${mirrors[0]}"; then
