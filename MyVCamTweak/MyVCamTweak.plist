@@ -4,27 +4,25 @@
 <dict>
 	<key>Filter</key>
 	<dict>
+		<!--
+		  Substrate's default is to AND every filter type that is present.
+		  Mode Any matches when any type matches. ElleKit's injector already
+		  ORs Bundles and Executables and ignores Mode; Any keeps that
+		  behavior if a Substrate-compatible loader is used.
+		  SpringBoard is a load witness only. %ctor writes runtime.status
+		  there and does not install Camera hooks. mediaserverd is not listed.
+		-->
+		<key>Mode</key>
+		<string>Any</string>
 		<key>Bundles</key>
 		<array>
-			<!--
-			  C1-A/B/C run inside Camera only. One bundle.
-			  Exact bundle id. Does not match mediaserverd or SpringBoard.
-			  C1-C arms the manager feed after startRunning returns,
-			  unless a disable marker can be opened or test.mp4 cannot
-			  be opened in the container, the jbroot mirror, or Documents.
-			  The viewfinder overlay reads VideoInjector while that feed
-			  is running.
-			-->
 			<string>com.apple.camera</string>
+			<string>com.apple.springboard</string>
 		</array>
 		<key>Executables</key>
 		<array>
-			<!--
-			  Camera.app's executable name. ElleKit loads the tweak when
-			  either Bundles or Executables matches, so this still hits
-			  Camera if com.apple.camera is not registered yet.
-			-->
 			<string>Camera</string>
+			<string>SpringBoard</string>
 		</array>
 	</dict>
 </dict>
