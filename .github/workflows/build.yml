@@ -225,7 +225,7 @@ jobs:
             exit 1
           fi
           python3 tools/finalize_load.py --verify "$merged"
-          mapfile -t mirrors_built < <(find .theos -name myvcam-mirror -type f -print)
+          mapfile -t mirrors_built < <(find .theos -path '*.dSYM' -prune -o -name myvcam-mirror -type f -print)
           if [[ ${#mirrors_built[@]} -eq 0 ]]; then
             echo "make finished without myvcam-mirror" >&2
             exit 1

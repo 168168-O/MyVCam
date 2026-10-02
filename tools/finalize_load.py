@@ -186,13 +186,21 @@ def sign_binary(path: Path) -> None:
     verify_binary(path)
 
 
+def _is_dsym_companion(path: Path) -> bool:
+    """dsymutil writes a DWARF file named like the dylib. It is not linked."""
+    return any(part.endswith(".dSYM") for part in path.parts)
+
+
 def _binaries_under(root: Path) -> list[Path]:
     found = []
     if not root.is_dir():
         return found
     for path in root.rglob("*"):
-        if path.is_file() and path.name in ("MyVCamTweak.dylib", "myvcam-mirror"):
-            found.append(path)
+        if not path.is_file() or path.name not in ("MyVCamTweak.dylib", "myvcam-mirror"):
+            continue
+        if _is_dsym_companion(path):
+            continue
+        found.append(path)
     return found
 
 
@@ -229,6 +237,9 @@ def main() -> int:
     for path in paths:
         if not path.is_file():
             raise SystemExit(f"missing binary {path}")
+        if _is_dsym_companion(path):
+            print(f"skip dSYM companion {path}")
+            continue
         if args.verify:
             verify_binary(path)
         else:
