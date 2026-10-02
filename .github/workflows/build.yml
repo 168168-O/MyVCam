@@ -78,6 +78,24 @@ jobs:
           fi
           "$clang" --version
 
+      - name: Install ldid
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) asset="ldid_linux_x86_64" ;;
+            aarch64|arm64) asset="ldid_linux_aarch64" ;;
+            *)
+              echo "unsupported runner arch: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o "${RUNNER_TEMP}/ldid" \
+            "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/${asset}"
+          sudo install -m 0755 "${RUNNER_TEMP}/ldid" /usr/local/bin/ldid
+          command -v ldid
+          # Usage text is enough to prove this is Procursus ldid with -Cadhoc.
+          ldid 2>&1 | head -n 4 || true
+
       - name: Install iPhoneOS 16.5 SDK
         run: |
           set -euo pipefail
@@ -190,10 +208,29 @@ jobs:
             echo "merged dylib is missing runtime.status" >&2
             exit 1
           fi
-          if ! grep -a -F '0.2.16' "$merged"; then
-            echo "merged dylib is missing the 0.2.16 status version" >&2
+          if ! grep -a -F '0.2.17' "$merged"; then
+            echo "merged dylib is missing the 0.2.17 status version" >&2
             exit 1
           fi
+          if ! grep -a -F 'early=1' "$merged"; then
+            echo "merged dylib is missing the early load marker" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'jb_errno=' "$merged"; then
+            echo "merged dylib is missing jb_errno" >&2
+            exit 1
+          fi
+          if ! grep -a -F '/var/tmp/myvcam-runtime.status' "$merged"; then
+            echo "merged dylib is missing the /var/tmp load witness" >&2
+            exit 1
+          fi
+          python3 tools/finalize_load.py --verify "$merged"
+          mapfile -t mirrors_built < <(find .theos -name myvcam-mirror -type f -print)
+          if [[ ${#mirrors_built[@]} -eq 0 ]]; then
+            echo "make finished without myvcam-mirror" >&2
+            exit 1
+          fi
+          python3 tools/finalize_load.py --verify "${mirrors_built[@]}"
           if ! grep -a -F 'proc=' "$merged"; then
             echo "merged dylib is missing the process status field" >&2
             exit 1
@@ -273,12 +310,12 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.16' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.16" >&2
+          if ! grep -q '^Version: 0.2.17' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.17" >&2
             exit 1
           fi
           deb_base="$(basename "${packaged[0]}")"
-          if [[ "$deb_base" != "com.myvcam.tweak_0.2.16-1+debug_iphoneos-arm64.deb" ]]; then
+          if [[ "$deb_base" != "com.myvcam.tweak_0.2.17-1+debug_iphoneos-arm64.deb" ]]; then
             echo "unexpected deb filename: ${deb_base}" >&2
             exit 1
           fi
@@ -325,6 +362,10 @@ jobs:
             echo "packaged filter is missing Mode Any" >&2
             exit 1
           fi
+          if grep -q '<!--' "${plists[0]}"; then
+            echo "packaged filter contains an XML comment; ElleKit drops the tweak if the plist fails to parse" >&2
+            exit 1
+          fi
           if grep -q 'com.myvcam.stage21.placeholder' "${plists[0]}"; then
             echo "packaged filter still contains the placeholder bundle" >&2
             exit 1
@@ -359,8 +400,24 @@ jobs:
             echo "packaged prerm does not match layout/DEBIAN/prerm" >&2
             exit 1
           fi
-          if ! grep -F 'version=0.2.16' "$control_dir/postinst"; then
-            echo "postinst is missing version=0.2.16" >&2
+          if ! grep -F 'version=0.2.17' "$control_dir/postinst"; then
+            echo "postinst is missing version=0.2.17" >&2
+            exit 1
+          fi
+          if ! grep -F 'substrate=' "$control_dir/postinst"; then
+            echo "postinst is missing substrate=" >&2
+            exit 1
+          fi
+          if ! grep -F 'framework=' "$control_dir/postinst"; then
+            echo "postinst is missing framework=" >&2
+            exit 1
+          fi
+          if ! grep -F 'tweak_inject=' "$control_dir/postinst"; then
+            echo "postinst is missing tweak_inject=" >&2
+            exit 1
+          fi
+          if ! grep -F 'dynamic_libs=' "$control_dir/postinst"; then
+            echo "postinst is missing dynamic_libs=" >&2
             exit 1
           fi
           if ! grep -F 'timestamp=' "$control_dir/postinst"; then
@@ -387,6 +444,10 @@ jobs:
             echo "prerm does not remove package.installed" >&2
             exit 1
           fi
+          if ! grep -F '/var/tmp/myvcam-runtime.status' "$control_dir/prerm"; then
+            echo "prerm does not remove the /var/tmp load witness" >&2
+            exit 1
+          fi
           if find "$extracted" -name 'package.installed' -print | grep -q .; then
             echo "deb data archive must not ship package.installed; postinst creates it" >&2
             exit 1
@@ -397,6 +458,7 @@ jobs:
             echo "deb layout is missing myvcam-mirror or its launch daemon" >&2
             exit 1
           fi
+          python3 tools/finalize_load.py --verify "${dylibs[0]}" "${mirrors[0]}"
           lipo_bin=""
           for candidate in lipo llvm-lipo; do
             if [[ -x "$THEOS/toolchain/linux/iphone/bin/$candidate" ]]; then

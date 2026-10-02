@@ -38,4 +38,8 @@ MyVCamTweak_CFLAGS = -fobjc-arc \
 
 MyVCamTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo Accelerate QuartzCore UIKit IOSurface
 
+# The aggregate before-package step re-signs after the substrate path edit.
+# -I keeps the identity off the ".unsigned" intermediate filename.
+MyVCamTweak_CODESIGN_FLAGS = -Icom.myvcam.tweak -Cadhoc -S
+
 include $(THEOS_MAKE_PATH)/tweak.mk

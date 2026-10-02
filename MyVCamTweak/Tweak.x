@@ -55,9 +55,13 @@
 //  postinst writes package.installed. That file is not runtime.status.
 //
 //  MyVCamTweak.plist matches com.apple.camera, Camera, com.apple.springboard,
-//  SpringBoard, com.apple.Preferences, and Preferences. SpringBoard and
-//  Preferences only prove the dylib ran %ctor. Camera hooks are not installed
-//  there. The dylib is arm64 only.
+//  SpringBoard, com.apple.Preferences, and Preferences. The plist has no XML
+//  comments: ElleKit skips a tweak when CFPropertyListCreateWithData fails.
+//  SpringBoard and Preferences only prove the dylib ran a constructor.
+//  Camera hooks are not installed there. The dylib is arm64 only.
+//  constructor(1) writes runtime.status and /var/tmp/myvcam-runtime.status
+//  with POSIX only, before %ctor. A linker ".unsigned" signature never gets
+//  this far: dyld rejects the image inside ElleKit's dlopen.
 //
 
 #import <AVFoundation/AVFoundation.h>
@@ -121,7 +125,10 @@ static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
 static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static const char kMyVCamRuntimeStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
-static const char kMyVCamStatusVersion[] = "0.2.16";
+static const char kMyVCamStatusVersion[] = "0.2.17";
+// Second witness. SpringBoard can write here even when a sandbox check
+// rejects the jbroot runtime.status file. Not package.installed.
+static const char kMyVCamEarlyStatusPath[] = "/var/tmp/myvcam-runtime.status";
 static NSString * const kMyVCamPreviewOverlayName = @"MyVCam.preview";
 #define kMyVCamHandoffCount 8
 static const int64_t kMyVCamMatchIntervalNanoseconds = (int64_t)(NSEC_PER_SEC / 30);
@@ -3707,11 +3714,47 @@ static int MyVCamLoad_IsCamera(void) {
     return 0;
 }
 
+// Runs before %ctor. POSIX only: no Objective-C, no locks, no hooks.
+// /var/tmp keeps early=1 and jb_errno even if the later status flush
+// replaces the jbroot file. Missing both files means dlopen never mapped us.
+__attribute__((constructor(1)))
+static void MyVCamLoad_EarlyMark(void) {
+    char proc[64];
+    char line[256];
+    char realPath[PATH_MAX];
+    const char *name = NULL;
+    int jbErrno = ENOENT;
+
+    name = getprogname();
+    MyVCamStatus_CopyToken(proc, sizeof(proc), name);
+    snprintf(line,
+             sizeof(line),
+             "version=%s proc=%s ctor=1 early=1\n",
+             kMyVCamStatusVersion,
+             proc[0] != '\0' ? proc : "-");
+    realPath[0] = '\0';
+    if (!MyVCamC1C_CopyRealJBPath("/var/jb", "/var/mobile/Library/MyVCam/runtime.status", realPath, sizeof(realPath))) {
+        MyVCamC1C_CopyRealJBPath("/private/var/jb", "/var/mobile/Library/MyVCam/runtime.status", realPath, sizeof(realPath));
+    }
+    if (realPath[0] != '\0') {
+        jbErrno = MyVCamStatus_WriteFile(realPath, line);
+    }
+    if (jbErrno != 0) {
+        jbErrno = MyVCamStatus_WriteFile(kMyVCamRuntimeStatusPath, line);
+    }
+    snprintf(line,
+             sizeof(line),
+             "version=%s proc=%s ctor=1 early=1 jb_errno=%d\n",
+             kMyVCamStatusVersion,
+             proc[0] != '\0' ? proc : "-",
+             jbErrno);
+    (void)MyVCamStatus_WriteFile(kMyVCamEarlyStatusPath, line);
+}
+
 %ctor {
-    // First, before InitState and %init. Mach-O ignores constructor
-    // priority, so this is the earliest reliable write. A dylib that maps
-    // and then dies in InitState or the hook installer still leaves
-    // ctor=1 init=0 in runtime.status. proc= names the loading process.
+    // After the priority-1 witness. A dylib that maps and then dies in
+    // InitState or the hook installer still leaves ctor=1 init=0 in
+    // runtime.status. proc= names the loading process.
     // version= is kMyVCamStatusVersion.
     MyVCamStatus_Mark(1, 0);
     // Load witness only. Do not install Camera hooks outside Camera.
