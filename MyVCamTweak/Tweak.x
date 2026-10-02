@@ -58,10 +58,10 @@
 //  SpringBoard, com.apple.Preferences, and Preferences. The plist has no XML
 //  comments: ElleKit skips a tweak when CFPropertyListCreateWithData fails.
 //  SpringBoard and Preferences only prove the dylib ran a constructor.
-//  Camera hooks are not installed there. The dylib is arm64 only.
+//  Camera hooks are not installed there. The dylib is arm64 plus arm64e.
+//  dyld on iPhone 12 does not map the arm64 slice into those arm64e processes.
 //  constructor(1) writes runtime.status and /var/tmp/myvcam-runtime.status
-//  with POSIX only, before %ctor. A linker ".unsigned" signature never gets
-//  this far: dyld rejects the image inside ElleKit's dlopen.
+//  with POSIX only, before %ctor. An image dyld rejects never gets this far.
 //
 
 #import <AVFoundation/AVFoundation.h>
@@ -125,7 +125,7 @@ static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
 static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static const char kMyVCamRuntimeStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
-static const char kMyVCamStatusVersion[] = "0.2.17";
+static const char kMyVCamStatusVersion[] = "0.2.18";
 // Second witness. SpringBoard can write here even when a sandbox check
 // rejects the jbroot runtime.status file. Not package.installed.
 static const char kMyVCamEarlyStatusPath[] = "/var/tmp/myvcam-runtime.status";
