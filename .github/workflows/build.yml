@@ -15,7 +15,9 @@ permissions:
 jobs:
   compile:
     name: Theos rootless compile and package
-    runs-on: ubuntu-22.04
+    # ubuntu-22.04 glibc is older than 2.38. The pinned clang (libLLVM 19)
+    # will not start there, so the arm64e slice never builds. 24.04 has 2.39.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,6 +25,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
+          # libtinfo5 is not in Ubuntu 24.04. Clang 19 links libtinfo.so.6.
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             ca-certificates \
@@ -30,7 +33,6 @@ jobs:
             dpkg \
             fakeroot \
             git \
-            libtinfo5 \
             libtinfo6 \
             perl \
             rsync \
