@@ -51,11 +51,13 @@
 //  IOSurface-backed 32BGRA sample. The process writes one line to
 //  /var/jb/var/mobile/Library/MyVCam/runtime.status so Filza can show ctor,
 //  feed, slot, and enqueue state without Console. The line includes proc=
-//  so a SpringBoard load can be told apart from a Camera load.
+//  so a SpringBoard or Preferences load can be told apart from a Camera load.
+//  postinst writes package.installed. That file is not runtime.status.
 //
 //  MyVCamTweak.plist matches com.apple.camera, Camera, com.apple.springboard,
-//  and SpringBoard. SpringBoard only proves the dylib ran %ctor. Camera
-//  hooks are not installed there. The dylib is arm64 only.
+//  SpringBoard, com.apple.Preferences, and Preferences. SpringBoard and
+//  Preferences only prove the dylib ran %ctor. Camera hooks are not installed
+//  there. The dylib is arm64 only.
 //
 
 #import <AVFoundation/AVFoundation.h>
@@ -119,7 +121,7 @@ static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
 static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static const char kMyVCamRuntimeStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
-static const char kMyVCamStatusVersion[] = "0.2.15";
+static const char kMyVCamStatusVersion[] = "0.2.16";
 static NSString * const kMyVCamPreviewOverlayName = @"MyVCam.preview";
 #define kMyVCamHandoffCount 8
 static const int64_t kMyVCamMatchIntervalNanoseconds = (int64_t)(NSEC_PER_SEC / 30);
@@ -3677,28 +3679,28 @@ static BOOL MyVCamPreview_ShouldKeepDetached(CALayer *layer) {
 
 %end
 
-// Positive SpringBoard match only. Camera and any other process still
-// install the existing hooks. SpringBoard must not.
-static int MyVCamLoad_IsSpringBoard(void) {
+// Camera is the only process that installs capture hooks. SpringBoard,
+// Preferences, and any other load write runtime.status and return.
+static int MyVCamLoad_IsCamera(void) {
     const char *prog = getprogname();
     char executable[1024];
     uint32_t size = sizeof(executable);
 
-    if (prog != NULL && strcmp(prog, "SpringBoard") == 0) {
+    if (prog != NULL && strcmp(prog, "Camera") == 0) {
         return 1;
     }
     executable[0] = '\0';
     if (_NSGetExecutablePath(executable, &size) == 0) {
         const char *leaf = MyVCamLoad_LastComponent(executable);
-        if (leaf != NULL && strcmp(leaf, "SpringBoard") == 0) {
+        if (leaf != NULL && strcmp(leaf, "Camera") == 0) {
             return 1;
         }
     }
     @autoreleasepool {
         NSString *name = [[NSProcessInfo processInfo] processName];
         NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
-        if ([name isEqualToString:@"SpringBoard"] ||
-            [bundle isEqualToString:@"com.apple.springboard"]) {
+        if ([name isEqualToString:@"Camera"] ||
+            [bundle isEqualToString:@"com.apple.camera"]) {
             return 1;
         }
     }
@@ -3709,10 +3711,11 @@ static int MyVCamLoad_IsSpringBoard(void) {
     // First, before InitState and %init. Mach-O ignores constructor
     // priority, so this is the earliest reliable write. A dylib that maps
     // and then dies in InitState or the hook installer still leaves
-    // ctor=1 init=0 in runtime.status. proc= is SpringBoard or Camera.
+    // ctor=1 init=0 in runtime.status. proc= names the loading process.
+    // version= is kMyVCamStatusVersion.
     MyVCamStatus_Mark(1, 0);
-    // Load witness only. Do not install Camera hooks in SpringBoard.
-    if (MyVCamLoad_IsSpringBoard()) {
+    // Load witness only. Do not install Camera hooks outside Camera.
+    if (!MyVCamLoad_IsCamera()) {
         return;
     }
     MyVCamC1A_InitState();

@@ -3,7 +3,8 @@
 #
 # Compiles the local-file reader, sample-buffer builder, injector, and the
 # C1-C manager feed into one dylib. INSTALL_TARGET_PROCESSES is empty on
-# purpose. The filter plist matches com.apple.camera only.
+# purpose. The filter plist matches Camera, SpringBoard, and Preferences.
+# SpringBoard and Preferences are load witnesses. Hooks stay in Camera.
 #
 
 # arm64 only. iPhone 12 is arm64e, and the Linux Theos clang emits an arm64e

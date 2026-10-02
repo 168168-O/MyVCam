@@ -190,16 +190,20 @@ jobs:
             echo "merged dylib is missing runtime.status" >&2
             exit 1
           fi
-          if ! grep -a -F '0.2.15' "$merged"; then
-            echo "merged dylib is missing the 0.2.15 status version" >&2
+          if ! grep -a -F '0.2.16' "$merged"; then
+            echo "merged dylib is missing the 0.2.16 status version" >&2
             exit 1
           fi
           if ! grep -a -F 'proc=' "$merged"; then
             echo "merged dylib is missing the process status field" >&2
             exit 1
           fi
-          if ! grep -a -F 'com.apple.springboard' "$merged"; then
-            echo "merged dylib is missing the SpringBoard bundle id" >&2
+          if ! grep -a -F 'version=%s proc=%s' "$merged"; then
+            echo "merged dylib status line is missing version= and proc=" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'com.apple.camera' "$merged"; then
+            echo "merged dylib is missing the Camera bundle id" >&2
             exit 1
           fi
           if ! grep -a -F 'preview connection blocked' "$merged"; then
@@ -269,10 +273,16 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.15' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.15" >&2
+          if ! grep -q '^Version: 0.2.16' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.16" >&2
             exit 1
           fi
+          deb_base="$(basename "${packaged[0]}")"
+          if [[ "$deb_base" != "com.myvcam.tweak_0.2.16-1+debug_iphoneos-arm64.deb" ]]; then
+            echo "unexpected deb filename: ${deb_base}" >&2
+            exit 1
+          fi
+          sha256sum "${packaged[0]}"
           extracted="${RUNNER_TEMP}/myvcam-deb"
           rm -rf "$extracted"
           mkdir -p "$extracted"
@@ -303,6 +313,14 @@ jobs:
             echo "packaged filter is missing executable SpringBoard" >&2
             exit 1
           fi
+          if ! grep -q '<string>com.apple.Preferences</string>' "${plists[0]}"; then
+            echo "packaged filter is missing com.apple.Preferences" >&2
+            exit 1
+          fi
+          if ! grep -q '<string>Preferences</string>' "${plists[0]}"; then
+            echo "packaged filter is missing executable Preferences" >&2
+            exit 1
+          fi
           if ! grep -q '<key>Mode</key>' "${plists[0]}" || ! grep -q '<string>Any</string>' "${plists[0]}"; then
             echo "packaged filter is missing Mode Any" >&2
             exit 1
@@ -313,6 +331,64 @@ jobs:
           fi
           if grep -E '<string>[^<]*mediaserverd[^<]*</string>' "${plists[0]}"; then
             echo "packaged filter names mediaserverd" >&2
+            exit 1
+          fi
+          control_dir="${RUNNER_TEMP}/myvcam-deb-control"
+          rm -rf "$control_dir"
+          mkdir -p "$control_dir"
+          dpkg-deb -e "${packaged[0]}" "$control_dir"
+          if [[ ! -f layout/DEBIAN/postinst ]]; then
+            echo "source postinst is missing" >&2
+            exit 1
+          fi
+          if [[ ! -f "$control_dir/postinst" ]]; then
+            echo "deb is missing postinst" >&2
+            exit 1
+          fi
+          if [[ ! -f "$control_dir/prerm" ]]; then
+            echo "deb is missing prerm" >&2
+            exit 1
+          fi
+          sh -n "$control_dir/postinst"
+          sh -n "$control_dir/prerm"
+          if ! cmp -s layout/DEBIAN/postinst "$control_dir/postinst"; then
+            echo "packaged postinst does not match layout/DEBIAN/postinst" >&2
+            exit 1
+          fi
+          if ! cmp -s layout/DEBIAN/prerm "$control_dir/prerm"; then
+            echo "packaged prerm does not match layout/DEBIAN/prerm" >&2
+            exit 1
+          fi
+          if ! grep -F 'version=0.2.16' "$control_dir/postinst"; then
+            echo "postinst is missing version=0.2.16" >&2
+            exit 1
+          fi
+          if ! grep -F 'timestamp=' "$control_dir/postinst"; then
+            echo "postinst is missing timestamp=" >&2
+            exit 1
+          fi
+          if ! grep -F 'exit=0' "$control_dir/postinst"; then
+            echo "postinst is missing exit=0" >&2
+            exit 1
+          fi
+          if ! grep -F '/var/jb/var/mobile/Library/MyVCam/package.installed' "$control_dir/postinst"; then
+            echo "postinst is missing the package.installed path" >&2
+            exit 1
+          fi
+          if ! grep -F 'runtime.status' "$control_dir/postinst"; then
+            echo "postinst no longer prepares runtime.status" >&2
+            exit 1
+          fi
+          if grep -F '/var/jb/var/mobile/Library/MyVCam/package.installed' "$control_dir/postinst" | grep -F 'runtime.status'; then
+            echo "postinst names package.installed and runtime.status on the same line" >&2
+            exit 1
+          fi
+          if ! grep -F '/var/jb/var/mobile/Library/MyVCam/package.installed' "$control_dir/prerm"; then
+            echo "prerm does not remove package.installed" >&2
+            exit 1
+          fi
+          if find "$extracted" -name 'package.installed' -print | grep -q .; then
+            echo "deb data archive must not ship package.installed; postinst creates it" >&2
             exit 1
           fi
           mapfile -t mirrors < <(find "$extracted" -name 'myvcam-mirror' -type f -print)
