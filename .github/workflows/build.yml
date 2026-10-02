@@ -190,6 +190,18 @@ jobs:
             echo "merged dylib is missing runtime.status" >&2
             exit 1
           fi
+          if ! grep -a -F '0.2.15' "$merged"; then
+            echo "merged dylib is missing the 0.2.15 status version" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'proc=' "$merged"; then
+            echo "merged dylib is missing the process status field" >&2
+            exit 1
+          fi
+          if ! grep -a -F 'com.apple.springboard' "$merged"; then
+            echo "merged dylib is missing the SpringBoard bundle id" >&2
+            exit 1
+          fi
           if ! grep -a -F 'preview connection blocked' "$merged"; then
             echo "merged dylib is missing the preview connection blocked log" >&2
             exit 1
@@ -257,8 +269,8 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.14' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.14" >&2
+          if ! grep -q '^Version: 0.2.15' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.15" >&2
             exit 1
           fi
           extracted="${RUNNER_TEMP}/myvcam-deb"
@@ -275,6 +287,10 @@ jobs:
             echo "packaged filter is not com.apple.camera" >&2
             exit 1
           fi
+          if ! grep -q '<string>com.apple.springboard</string>' "${plists[0]}"; then
+            echo "packaged filter is missing com.apple.springboard" >&2
+            exit 1
+          fi
           if ! grep -q '<key>Executables</key>' "${plists[0]}"; then
             echo "packaged filter is missing Executables" >&2
             exit 1
@@ -283,12 +299,20 @@ jobs:
             echo "packaged filter is missing executable Camera" >&2
             exit 1
           fi
+          if ! grep -q '<string>SpringBoard</string>' "${plists[0]}"; then
+            echo "packaged filter is missing executable SpringBoard" >&2
+            exit 1
+          fi
+          if ! grep -q '<key>Mode</key>' "${plists[0]}" || ! grep -q '<string>Any</string>' "${plists[0]}"; then
+            echo "packaged filter is missing Mode Any" >&2
+            exit 1
+          fi
           if grep -q 'com.myvcam.stage21.placeholder' "${plists[0]}"; then
             echo "packaged filter still contains the placeholder bundle" >&2
             exit 1
           fi
-          if grep -E '<string>[^<]*(mediaserverd|SpringBoard)[^<]*</string>' "${plists[0]}"; then
-            echo "packaged filter names a real process" >&2
+          if grep -E '<string>[^<]*mediaserverd[^<]*</string>' "${plists[0]}"; then
+            echo "packaged filter names mediaserverd" >&2
             exit 1
           fi
           mapfile -t mirrors < <(find "$extracted" -name 'myvcam-mirror' -type f -print)

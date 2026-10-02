@@ -50,10 +50,12 @@
 //  for the life of the capture session. Each enqueued frame is an
 //  IOSurface-backed 32BGRA sample. The process writes one line to
 //  /var/jb/var/mobile/Library/MyVCam/runtime.status so Filza can show ctor,
-//  feed, slot, and enqueue state without Console.
+//  feed, slot, and enqueue state without Console. The line includes proc=
+//  so a SpringBoard load can be told apart from a Camera load.
 //
-//  MyVCamTweak.plist matches bundle com.apple.camera and executable Camera.
-//  The dylib is arm64 only.
+//  MyVCamTweak.plist matches com.apple.camera, Camera, com.apple.springboard,
+//  and SpringBoard. SpringBoard only proves the dylib ran %ctor. Camera
+//  hooks are not installed there. The dylib is arm64 only.
 //
 
 #import <AVFoundation/AVFoundation.h>
@@ -73,6 +75,7 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <limits.h>
+#import <mach-o/dyld.h>
 #import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
@@ -116,7 +119,7 @@ static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
 static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static const char kMyVCamRuntimeStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
-static const char kMyVCamStatusVersion[] = "0.2.14";
+static const char kMyVCamStatusVersion[] = "0.2.15";
 static NSString * const kMyVCamPreviewOverlayName = @"MyVCam.preview";
 #define kMyVCamHandoffCount 8
 static const int64_t kMyVCamMatchIntervalNanoseconds = (int64_t)(NSEC_PER_SEC / 30);
@@ -689,6 +692,7 @@ static char gStatusReason[24];
 static char gStatusHierarchy[384];
 static char gStatusFrame[48];
 static char gStatusWhere[16];
+static char gStatusProc[64];
 static int gStatusCtor = 0;
 static int gStatusInit = 0;
 static int gStatusFeedErrno = 0;
@@ -736,6 +740,61 @@ static void MyVCamStatus_CopyToken(char *dest, size_t size, const char *src) {
         return;
     }
     dest[used] = '\0';
+}
+
+static const char *MyVCamLoad_LastComponent(const char *path) {
+    const char *slash = NULL;
+
+    if (path == NULL || path[0] == '\0') {
+        return path;
+    }
+    slash = strrchr(path, '/');
+    if (slash == NULL || slash[1] == '\0') {
+        return path;
+    }
+    return slash + 1;
+}
+
+// Prefer the Objective-C process name. Fall back to argv0 (getprogname, then
+// the executable path) so the first status line still names the process if
+// NSProcessInfo is empty. Called once; later flushes keep the token.
+static void MyVCamStatus_RememberProcess(void) {
+    char token[64];
+    char executable[1024];
+    const char *chosen = NULL;
+    uint32_t size = sizeof(executable);
+
+    token[0] = '\0';
+    os_unfair_lock_lock(&gStatusLock);
+    if (gStatusProc[0] != '\0') {
+        os_unfair_lock_unlock(&gStatusLock);
+        return;
+    }
+    os_unfair_lock_unlock(&gStatusLock);
+
+    @autoreleasepool {
+        NSString *name = [[NSProcessInfo processInfo] processName];
+        const char *utf8 = name.UTF8String;
+        if (utf8 != NULL && utf8[0] != '\0') {
+            MyVCamStatus_CopyToken(token, sizeof(token), utf8);
+            chosen = token;
+        }
+    }
+    if (chosen == NULL || chosen[0] == '\0') {
+        chosen = getprogname();
+        if (chosen == NULL || chosen[0] == '\0') {
+            executable[0] = '\0';
+            if (_NSGetExecutablePath(executable, &size) == 0) {
+                chosen = MyVCamLoad_LastComponent(executable);
+            }
+        }
+        MyVCamStatus_CopyToken(token, sizeof(token), chosen);
+    }
+    os_unfair_lock_lock(&gStatusLock);
+    if (gStatusProc[0] == '\0') {
+        snprintf(gStatusProc, sizeof(gStatusProc), "%s", token[0] != '\0' ? token : "-");
+    }
+    os_unfair_lock_unlock(&gStatusLock);
 }
 
 static void MyVCamStatus_MkdirParent(const char *filePath) {
@@ -832,6 +891,7 @@ static void MyVCamStatus_Format(char *line, size_t size) {
     char hierarchy[384];
     char frame[48];
     char where[16];
+    char proc[64];
     int ctor = 0;
     int initFlag = 0;
     int feedErrno = 0;
@@ -883,6 +943,7 @@ static void MyVCamStatus_Format(char *line, size_t size) {
     memcpy(hierarchy, gStatusHierarchy, sizeof(hierarchy));
     memcpy(frame, gStatusFrame, sizeof(frame));
     memcpy(where, gStatusWhere, sizeof(where));
+    memcpy(proc, gStatusProc, sizeof(proc));
     os_unfair_lock_unlock(&gStatusLock);
 
     os_unfair_lock_lock(&gLock);
@@ -896,8 +957,9 @@ static void MyVCamStatus_Format(char *line, size_t size) {
     }
     snprintf(line,
              size,
-             "version=%s ctor=%d init=%d phase=%s session=%d feed_errno=%d prepare=%d path=%s err=%s windows=%d layers=%d host=%s host_layer=%d above=%s container=%s slot=%s in_window=%d frame=%s live_hidden=%d superlayer=%d conn=%d enqueue=%d reason=%s px=%dx%d host_cover=%d blocks=%u detaches=%u write=%s write_errno=%d hierarchy=%s\n",
+             "version=%s proc=%s ctor=%d init=%d phase=%s session=%d feed_errno=%d prepare=%d path=%s err=%s windows=%d layers=%d host=%s host_layer=%d above=%s container=%s slot=%s in_window=%d frame=%s live_hidden=%d superlayer=%d conn=%d enqueue=%d reason=%s px=%dx%d host_cover=%d blocks=%u detaches=%u write=%s write_errno=%d hierarchy=%s\n",
              kMyVCamStatusVersion,
+             proc[0] != '\0' ? proc : "-",
              ctor,
              initFlag,
              phaseName,
@@ -1023,6 +1085,7 @@ static void MyVCamStatus_Flush(int force) {
     gStatusLastWrite = now != 0 ? now : 1;
     os_unfair_lock_unlock(&gStatusLock);
 
+    MyVCamStatus_RememberProcess();
     MyVCamStatus_Format(line, sizeof(line));
     MyVCamStatus_WriteAll(line, &jbOK, &containerOK, &homeOK, &writeErrno);
     if (jbOK) {
@@ -1056,6 +1119,7 @@ static void MyVCamStatus_Flush(int force) {
 }
 
 static void MyVCamStatus_Mark(int ctor, int initFlag) {
+    MyVCamStatus_RememberProcess();
     os_unfair_lock_lock(&gStatusLock);
     if (ctor) {
         gStatusCtor = 1;
@@ -3613,12 +3677,44 @@ static BOOL MyVCamPreview_ShouldKeepDetached(CALayer *layer) {
 
 %end
 
+// Positive SpringBoard match only. Camera and any other process still
+// install the existing hooks. SpringBoard must not.
+static int MyVCamLoad_IsSpringBoard(void) {
+    const char *prog = getprogname();
+    char executable[1024];
+    uint32_t size = sizeof(executable);
+
+    if (prog != NULL && strcmp(prog, "SpringBoard") == 0) {
+        return 1;
+    }
+    executable[0] = '\0';
+    if (_NSGetExecutablePath(executable, &size) == 0) {
+        const char *leaf = MyVCamLoad_LastComponent(executable);
+        if (leaf != NULL && strcmp(leaf, "SpringBoard") == 0) {
+            return 1;
+        }
+    }
+    @autoreleasepool {
+        NSString *name = [[NSProcessInfo processInfo] processName];
+        NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+        if ([name isEqualToString:@"SpringBoard"] ||
+            [bundle isEqualToString:@"com.apple.springboard"]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 %ctor {
     // First, before InitState and %init. Mach-O ignores constructor
     // priority, so this is the earliest reliable write. A dylib that maps
     // and then dies in InitState or the hook installer still leaves
-    // ctor=1 init=0 in runtime.status.
+    // ctor=1 init=0 in runtime.status. proc= is SpringBoard or Camera.
     MyVCamStatus_Mark(1, 0);
+    // Load witness only. Do not install Camera hooks in SpringBoard.
+    if (MyVCamLoad_IsSpringBoard()) {
+        return;
+    }
     MyVCamC1A_InitState();
     dispatch_async(dispatch_get_main_queue(), ^{
         %init;
