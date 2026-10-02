@@ -22,5 +22,6 @@ TOOL_NAME = myvcam-mirror
 myvcam-mirror_FILES = main.c
 myvcam-mirror_CFLAGS = -Wall -Wextra -Wno-unused-parameter
 myvcam-mirror_INSTALL_PATH = /usr/bin
+myvcam-mirror_CODESIGN_FLAGS = -Icom.myvcam.mirror -Cadhoc -S
 
 include $(THEOS_MAKE_PATH)/tool.mk

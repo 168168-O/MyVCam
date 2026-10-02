@@ -4,16 +4,6 @@
 <dict>
 	<key>Filter</key>
 	<dict>
-		<!--
-		  Substrate's default is to AND every filter type that is present.
-		  Mode Any matches when any type matches. ElleKit's injector already
-		  ORs Bundles and Executables and ignores Mode; Any keeps that
-		  behavior if a Substrate-compatible loader is used.
-		  SpringBoard and Preferences are load witnesses only. %ctor writes
-		  runtime.status there and does not install Camera hooks.
-		  Preferences is Settings.app. ElleKit on Dopamine injects that
-		  UIKit app. mediaserverd is not listed.
-		-->
 		<key>Mode</key>
 		<string>Any</string>
 		<key>Bundles</key>
