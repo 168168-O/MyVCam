@@ -7,6 +7,8 @@ MIRROR="/var/jb/usr/bin/myvcam-mirror"
 PLIST="/var/jb/Library/LaunchDaemons/com.myvcam.mirror.plist"
 LOGDIR="/var/jb/var/mobile/Library/MyVCam"
 LOG="$LOGDIR/postinst.log"
+# Install success. Written by this script as root. Not runtime.status.
+MARK="/var/jb/var/mobile/Library/MyVCam/package.installed"
 LAUNCHCTL=""
 
 mkdir -p "$LOGDIR"
@@ -53,4 +55,12 @@ fi
 } >"$LOG" 2>&1 || true
 
 chmod 0644 "$LOG" 2>/dev/null || true
+
+# Separate from runtime.status. A 0-byte runtime.status does not mean
+# this package failed to install. exit=0 is this script's exit status.
+mkdir -p "$LOGDIR"
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
+euid=$(id -u 2>/dev/null || echo unknown)
+printf 'version=0.2.16 timestamp=%s exit=0 euid=%s\n' "$ts" "$euid" >"$MARK" || true
+chmod 0644 "$MARK" 2>/dev/null || true
 exit 0

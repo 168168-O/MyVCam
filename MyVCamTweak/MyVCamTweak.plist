@@ -9,8 +9,10 @@
 		  Mode Any matches when any type matches. ElleKit's injector already
 		  ORs Bundles and Executables and ignores Mode; Any keeps that
 		  behavior if a Substrate-compatible loader is used.
-		  SpringBoard is a load witness only. %ctor writes runtime.status
-		  there and does not install Camera hooks. mediaserverd is not listed.
+		  SpringBoard and Preferences are load witnesses only. %ctor writes
+		  runtime.status there and does not install Camera hooks.
+		  Preferences is Settings.app. ElleKit on Dopamine injects that
+		  UIKit app. mediaserverd is not listed.
 		-->
 		<key>Mode</key>
 		<string>Any</string>
@@ -18,11 +20,13 @@
 		<array>
 			<string>com.apple.camera</string>
 			<string>com.apple.springboard</string>
+			<string>com.apple.Preferences</string>
 		</array>
 		<key>Executables</key>
 		<array>
 			<string>Camera</string>
 			<string>SpringBoard</string>
+			<string>Preferences</string>
 		</array>
 	</dict>
 </dict>
