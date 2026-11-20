@@ -1,8 +1,8 @@
 Package: com.myvcam.tweak
 Name: MyVCam
-Version: 0.2.18
+Version: 0.2.20
 Architecture: iphoneos-arm64
-Description: Camera viewfinder from a fixed local video. No mediaserverd injection.
+Description: Camera viewfinder from a picked video, injectable into any app. No mediaserverd injection.
 Maintainer: MyVCam Project
 Author: MyVCam Project
 Section: Tweaks
