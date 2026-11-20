@@ -220,8 +220,8 @@ jobs:
             echo "merged dylib is missing runtime.status" >&2
             exit 1
           fi
-          if ! grep -a -F '0.2.18' "$merged"; then
-            echo "merged dylib is missing the 0.2.18 status version" >&2
+          if ! grep -a -F '0.2.20' "$merged"; then
+            echo "merged dylib is missing the 0.2.20 status version" >&2
             exit 1
           fi
           if ! grep -a -F 'early=1' "$merged"; then
@@ -322,12 +322,12 @@ jobs:
             echo "deb Architecture is not iphoneos-arm64" >&2
             exit 1
           fi
-          if ! grep -q '^Version: 0.2.18' <<<"$control_text"; then
-            echo "deb Version does not start at 0.2.18" >&2
+          if ! grep -q '^Version: 0.2.20' <<<"$control_text"; then
+            echo "deb Version does not start at 0.2.20" >&2
             exit 1
           fi
           deb_base="$(basename "${packaged[0]}")"
-          if [[ "$deb_base" != "com.myvcam.tweak_0.2.18-1+debug_iphoneos-arm64.deb" ]]; then
+          if [[ "$deb_base" != "com.myvcam.tweak_0.2.20-1+debug_iphoneos-arm64.deb" ]]; then
             echo "unexpected deb filename: ${deb_base}" >&2
             exit 1
           fi
@@ -412,8 +412,8 @@ jobs:
             echo "packaged prerm does not match layout/DEBIAN/prerm" >&2
             exit 1
           fi
-          if ! grep -F 'version=0.2.18' "$control_dir/postinst"; then
-            echo "postinst is missing version=0.2.18" >&2
+          if ! grep -F 'version=0.2.20' "$control_dir/postinst"; then
+            echo "postinst is missing version=0.2.20" >&2
             exit 1
           fi
           if ! grep -F 'substrate=' "$control_dir/postinst"; then
