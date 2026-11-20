@@ -89,6 +89,8 @@
 #import <time.h>
 #import <substrate.h>
 #import <unistd.h>
+
+#import "../Sources/UI/MyVCamPicker.h"
 #import "MyVCamManager.h"
 #import "VideoInjector.h"
 
@@ -1355,6 +1357,23 @@ static BOOL MyVCamC1C_DisableFilePresent(void) {
     return NO;
 }
 
+/// Host-app sandbox copy: <Documents>/MyVCam/test.mp4.
+/// A TrollFools-injected app can only read inside its own container, so this
+/// candidate wins over the jailbreak paths when the user picked a video.
+static const char *MyVCamC1C_DocumentsVideoPath(void) {
+    static char resolved[PATH_MAX];
+    @autoreleasepool {
+        NSURL *url = MyVCamPickerPreferredVideoURL();
+        if (url == nil) {
+            return NULL;
+        }
+        if (![url.path getFileSystemRepresentation:resolved maxLength:sizeof(resolved)]) {
+            return NULL;
+        }
+    }
+    return resolved;
+}
+
 /// Container library, real jbroot path, /var/jb symlink, then Documents.
 /// The Documents constant stays in the binary. The path that opens is the
 /// one attach uses.
@@ -1366,11 +1385,17 @@ static const char *MyVCamC1C_ReadableVideoPath(int *outErrno) {
     char status[1024];
     char containerVideo[PATH_MAX];
     char documentsPrivate[PATH_MAX];
-    const char *candidates[8];
+    const char *candidates[12];
     int count = 0;
     int savedErrno = 0;
     const char *primary = MyVCamManagerTestVideoPathUTF8;
 
+    // Highest priority: the video the user picked from Photos, stored in the
+    // host app's own sandbox. Injected apps cannot see /var/mobile/Documents.
+    const char *picked = MyVCamC1C_DocumentsVideoPath();
+    if (picked != NULL) {
+        candidates[count++] = picked;
+    }
     if (MyVCamC1C_CopyLibraryPath("MyVCam/test.mp4", libraryVideo, sizeof(libraryVideo))) {
         candidates[count++] = libraryVideo;
     }
@@ -3714,6 +3739,20 @@ static int MyVCamLoad_IsCamera(void) {
     return 0;
 }
 
+// Load witnesses only. These processes must never install capture hooks.
+// Every other process may host the feed: TrollFools can inject this dylib
+// into any third-party app, not just Camera.
+static int MyVCamLoad_IsWitnessOnly(void) {
+    @autoreleasepool {
+        NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+        if ([bundle isEqualToString:@"com.apple.springboard"] ||
+            [bundle isEqualToString:@"com.apple.Preferences"]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Runs before %ctor. POSIX only: no Objective-C, no locks, no hooks.
 // /var/tmp keeps early=1 and jb_errno even if the later status flush
 // replaces the jbroot file. Missing both files means dlopen never mapped us.
@@ -3757,8 +3796,8 @@ static void MyVCamLoad_EarlyMark(void) {
     // runtime.status. proc= names the loading process.
     // version= is kMyVCamStatusVersion.
     MyVCamStatus_Mark(1, 0);
-    // Load witness only. Do not install Camera hooks outside Camera.
-    if (!MyVCamLoad_IsCamera()) {
+    // Witness-only processes load, log, and return.
+    if (MyVCamLoad_IsWitnessOnly()) {
         return;
     }
     MyVCamC1A_InitState();
@@ -3767,6 +3806,11 @@ static void MyVCamLoad_EarlyMark(void) {
         NSLog(@"%s init runs=1", kMyVCamDiagPrefix);
         NSLog(@"%s hooks installed", kMyVCamC1APrefix);
         MyVCamStatus_Mark(1, 1);
-        MyVCamPreview_Start();
+        // Camera keeps its preview-layer takeover; injected third-party apps
+        // only use the delegate feed plus the picker button.
+        if (MyVCamLoad_IsCamera()) {
+            MyVCamPreview_Start();
+        }
+        MyVCamPickerInstall();
     });
 }
