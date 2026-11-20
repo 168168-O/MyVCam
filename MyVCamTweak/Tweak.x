@@ -127,7 +127,7 @@ static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
 static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static const char kMyVCamRuntimeStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
-static const char kMyVCamStatusVersion[] = "0.2.18";
+static const char kMyVCamStatusVersion[] = "0.2.20";
 // Second witness. SpringBoard can write here even when a sandbox check
 // rejects the jbroot runtime.status file. Not package.installed.
 static const char kMyVCamEarlyStatusPath[] = "/var/tmp/myvcam-runtime.status";
