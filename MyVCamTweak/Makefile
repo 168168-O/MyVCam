@@ -29,15 +29,17 @@ MyVCamTweak_FILES = Tweak.x \
 	$(SRC)/Core/MyVCamManager.m \
 	$(SRC)/Media/MediaReader.m \
 	$(SRC)/Buffer/SampleBufferBuilder.m \
-	$(SRC)/Inject/VideoInjector.m
+	$(SRC)/Inject/VideoInjector.m \
+	$(SRC)/UI/MyVCamPicker.m
 
 MyVCamTweak_CFLAGS = -fobjc-arc \
 	-I$(SRC)/Core \
 	-I$(SRC)/Media \
 	-I$(SRC)/Buffer \
-	-I$(SRC)/Inject
+	-I$(SRC)/Inject \
+	-I$(SRC)/UI
 
-MyVCamTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo Accelerate QuartzCore UIKit IOSurface
+MyVCamTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo Accelerate QuartzCore UIKit IOSurface PhotosUI
 
 # The aggregate before-package step re-signs after the substrate path edit.
 # -I keeps the identity off the ".unsigned" intermediate filename.
