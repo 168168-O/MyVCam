@@ -54,6 +54,23 @@
 //  so a SpringBoard or Preferences load can be told apart from a Camera load.
 //  postinst writes package.installed. That file is not runtime.status.
 //
+//  0.2.21 audio: AVCaptureAudioDataOutput -setSampleBufferDelegate:queue: is
+//  hooked the same way as the video output. Audio sample buffers go to
+//  AudioInjector instead of the VideoInjector match path. The injector picks
+//  the sidecar cloned-voice file when the picker stored one in that mode, and
+//  otherwise the picked video's own audio track. Decoding is lazy: the first
+//  audio callback supplies the microphone's AudioStreamBasicDescription, the
+//  whole track is decoded once to 16-bit interleaved PCM in that format on
+//  com.myvcam.audio.prepare (capped, looped), and each later callback gets a
+//  replacement sample buffer built on the origin format description with the
+//  origin presentation time and duration. Audio is replaced whenever the
+//  session is running and the tweak is not disabled; it does not wait for a
+//  published video frame and does not need a video file at all. A missing
+//  source, an unsupported microphone format, or a file with no audio track
+//  leaves the real microphone in place. The picker panel has a second "声"
+//  button: tap opens a menu (video audio / cloned voice / import or remove
+//  the voice file), long press toggles the two modes.
+//
 //  MyVCamTweak.plist matches com.apple.camera, Camera, com.apple.springboard,
 //  SpringBoard, com.apple.Preferences, and Preferences. The plist has no XML
 //  comments: ElleKit skips a tweak when CFPropertyListCreateWithData fails.
@@ -93,6 +110,7 @@
 #import "../Sources/UI/MyVCamPicker.h"
 #import "MyVCamManager.h"
 #import "VideoInjector.h"
+#import "AudioInjector.h"
 
 typedef void (*MyVCamC1ACaptureOutputIMP)(id, SEL, AVCaptureOutput *, CMSampleBufferRef, AVCaptureConnection *);
 
@@ -127,7 +145,7 @@ static const char kMyVCamMirrorVideoPath[] = "/var/jb/var/mobile/Library/MyVCam/
 static const char kMyVCamMirrorDisablePath[] = "/var/jb/var/mobile/Library/MyVCam/disable";
 static const char kMyVCamMirrorStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/mirror.status";
 static const char kMyVCamRuntimeStatusPath[] = "/var/jb/var/mobile/Library/MyVCam/runtime.status";
-static const char kMyVCamStatusVersion[] = "0.2.20";
+static const char kMyVCamStatusVersion[] = "0.2.21";
 // Second witness. SpringBoard can write here even when a sandbox check
 // rejects the jbroot runtime.status file. Not package.installed.
 static const char kMyVCamEarlyStatusPath[] = "/var/tmp/myvcam-runtime.status";
@@ -318,6 +336,17 @@ static BOOL MyVCamC1B_OriginIsVideoImage(CMSampleBufferRef sampleBuffer) {
         return NO;
     }
     return CMFormatDescriptionGetMediaType(format) == kCMMediaType_Video;
+}
+
+static BOOL MyVCamC1B_OriginIsAudio(CMSampleBufferRef sampleBuffer) {
+    if (sampleBuffer == NULL || !CMSampleBufferIsValid(sampleBuffer)) {
+        return NO;
+    }
+    CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (format == NULL) {
+        return NO;
+    }
+    return CMFormatDescriptionGetMediaType(format) == kCMMediaType_Audio;
 }
 
 /// Takes ownership of `owned` (+1 or NULL). Retires the delivery from eight
@@ -1441,6 +1470,21 @@ static const char *MyVCamC1C_ReadableVideoPath(int *outErrno) {
     return NULL;
 }
 
+/// The audio injector needs both candidates: the sidecar cloned voice (only
+/// when the user selected that mode) and the video whose track is the
+/// fallback. Decoding stays lazy; this only records the paths.
+static void MyVCamAudio_Configure(NSURL *videoURL) {
+    NSURL *voiceURL = MyVCamPickerPreferredAudioURL();
+    if (videoURL == nil) {
+        const char *readable = MyVCamC1C_ReadableVideoPath(NULL);
+        if (readable != NULL) {
+            videoURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:readable]
+                                  isDirectory:NO];
+        }
+    }
+    [[AudioInjector sharedInjector] setSidecarURL:voiceURL videoURL:videoURL];
+}
+
 static BOOL MyVCamC1C_SessionDidStart(uint64_t generation) {
     // Runs on com.myvcam.enable, off the capture delegate queue and off
     // -startRunning. A missing file returns NO and does not arm the timer.
@@ -1473,6 +1517,7 @@ static BOOL MyVCamC1C_SessionDidStart(uint64_t generation) {
     }
     NSURL *fileURL = [NSURL fileURLWithPath:path isDirectory:NO];
     [manager attachMediaFileURL:fileURL];
+    MyVCamAudio_Configure(fileURL);
     NSError *error = nil;
     BOOL started = [manager startWithError:&error];
     if (!MyVCamC1C_GenerationIsCurrent(generation)) {
@@ -1545,6 +1590,7 @@ int MyVCamPickerIsDisabled(void) {
 }
 
 void MyVCamPickerVideoDidChange(void) {
+    MyVCamAudio_Configure(nil);
     uint64_t generation = 0;
     os_unfair_lock_lock(&gLock);
     BOOL running = gCaptureSessionRunning;
@@ -1560,6 +1606,14 @@ void MyVCamPickerVideoDidChange(void) {
     }
     MyVCamC1C_ScheduleEnable(generation);
     NSLog(@"%s feed re-armed after the picked video changed", kMyVCamC1CPrefix);
+}
+
+void MyVCamPickerAudioDidChange(void) {
+    MyVCamAudio_Configure(nil);
+    NSLog(@"%s audio source reloaded mode=%d voice=%d",
+          kMyVCamC1CPrefix,
+          MyVCamPickerAudioMode(),
+          MyVCamPickerPreferredAudioURL() != nil ? 1 : 0);
 }
 
 void MyVCamPickerSetDisabled(int disabled) {
@@ -1713,6 +1767,9 @@ static void MyVCamC1C_EnableOnQueue(uint64_t generation, int attempt, int prepar
 static void MyVCamC1C_ScheduleEnable(uint64_t generation) {
     // Next turn, off -startRunning.
     dispatch_async(gEnableQueue, ^{
+        // Audio does not need a video file, so it is configured before the
+        // video retry loop can return early.
+        MyVCamAudio_Configure(nil);
         MyVCamC1C_EnableOnQueue(generation, 0, 0);
     });
 }
@@ -1736,7 +1793,32 @@ static void MyVCamC1A_Deliver(id self,
     // or the injector. A live session with nothing published yet also skips
     // the injector; it only records a video buffer so the match queue can
     // learn the format.
-    if (!running || phase != MyVCamPhaseLive) {
+    if (!running || phase == MyVCamPhaseDisabled) {
+        ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
+        return;
+    }
+
+    // Audio is independent of the video feed: it can start replacing during
+    // warmup and keeps working even when no video frame is published yet.
+    if (MyVCamC1B_OriginIsAudio(sampleBuffer)) {
+        CMSampleBufferRef replaced = NULL;
+        @try {
+            replaced = [[AudioInjector sharedInjector]
+                copySampleBufferMatchingOrigin:sampleBuffer];
+        } @catch (NSException *exception) {
+            replaced = NULL;
+            NSLog(@"%s audio replacement skipped: %@", kMyVCamC1BPrefix, exception);
+        }
+        if (replaced != NULL) {
+            ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, replaced, connection);
+            CFRelease(replaced);
+            return;
+        }
+        ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
+        return;
+    }
+
+    if (phase != MyVCamPhaseLive) {
         ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
         return;
     }
@@ -1894,6 +1976,17 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
 
 - (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
     // Let AVFoundation finish the setter before the class is mutated.
+    %orig;
+    MyVCamC1A_HookDelegateIfNeeded(sampleBufferDelegate);
+}
+
+%end
+
+%hook AVCaptureAudioDataOutput
+
+- (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
+    // The audio delegate often differs from the video delegate class, so the
+    // same hook has to be installed on whichever class implements it here.
     %orig;
     MyVCamC1A_HookDelegateIfNeeded(sampleBufferDelegate);
 }
