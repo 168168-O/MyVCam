@@ -147,7 +147,10 @@ static void MyVCamPickerToast(NSString *text) {
         BOOL copied = [manager copyItemAtURL:url toURL:destination error:&copyError];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (copied) {
-                MyVCamPickerToast(@"已保存，重开相机界面生效");
+                // Re-arm the live session so the change is visible at once.
+                MyVCamPickerSetDisabled(0);
+                MyVCamPickerVideoDidChange();
+                MyVCamPickerToast(@"已切换为所选视频");
             } else {
                 MyVCamPickerToast(@"保存失败，换个视频试试");
                 NSLog(@"[MyVCam Picker] copy failed: %@", copyError);
@@ -231,6 +234,16 @@ static UIViewController *MyVCamPickerTopViewController(UIWindowScene *scene) {
     [gesture setTranslation:CGPointZero inView:window];
 }
 
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) {
+        return;
+    }
+    int nextDisabled = MyVCamPickerIsDisabled() ? 0 : 1;
+    MyVCamPickerSetDisabled(nextDisabled);
+    MyVCamPickerToast(nextDisabled ? @"已切回真实相机" : @"已恢复视频替换");
+    NSLog(@"[MyVCam Picker] long press, disabled=%d", nextDisabled);
+}
+
 - (void)presentPicker {
     UIWindowScene *scene = MyVCamPickerActiveScene();
     UIViewController *presenter = scene != nil ? MyVCamPickerTopViewController(scene) : nil;
@@ -286,6 +299,11 @@ static void MyVCamPickerAttachButton(void) {
                               48.0);
     [button addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controller
                                                                         action:@selector(handlePan:)]];
+    UILongPressGestureRecognizer *longPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:controller
+                                                      action:@selector(handleLongPress:)];
+    longPress.minimumPressDuration = 0.6;
+    [button addGestureRecognizer:longPress];
     [button addTarget:controller
                action:@selector(handleTap:)
      forControlEvents:UIControlEventTouchUpInside];
