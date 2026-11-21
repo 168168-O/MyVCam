@@ -1444,6 +1444,11 @@ static const char *MyVCamC1C_ReadableVideoPath(int *outErrno) {
 static BOOL MyVCamC1C_SessionDidStart(uint64_t generation) {
     // Runs on com.myvcam.enable, off the capture delegate queue and off
     // -startRunning. A missing file returns NO and does not arm the timer.
+    if (MyVCamPickerIsDisabled()) {
+        MyVCamStatus_SetFeed("", 0, "disabled", -1, 1);
+        NSLog(@"%s feed skipped: user selected the real camera", kMyVCamC1CPrefix);
+        return NO;
+    }
     if (!MyVCamC1C_GenerationIsCurrent(generation)) {
         return NO;
     }
@@ -1527,6 +1532,46 @@ static void MyVCamC1C_NoteSessionStopped(void) {
         NSLog(@"%s capture session stopped the feed", kMyVCamC1CPrefix);
     });
     MyVCamPreview_Stop();
+}
+
+#pragma mark - Picker integration
+
+// 1 = the user asked for the real camera. The feed stays detached and
+// MyVCamC1C_SessionDidStart returns NO so AVFoundation passes frames through.
+static int gMyVCamPickerDisabled = 0;
+
+int MyVCamPickerIsDisabled(void) {
+    return __atomic_load_n(&gMyVCamPickerDisabled, __ATOMIC_RELAXED);
+}
+
+void MyVCamPickerVideoDidChange(void) {
+    uint64_t generation = 0;
+    os_unfair_lock_lock(&gLock);
+    BOOL running = gCaptureSessionRunning;
+    if (running) {
+        gSessionGeneration += 1;
+        gPhase = MyVCamPhaseWarmup;
+        generation = gSessionGeneration;
+    }
+    os_unfair_lock_unlock(&gLock);
+    if (!running) {
+        // No live session: the next startRunning picks the new file.
+        return;
+    }
+    MyVCamC1C_ScheduleEnable(generation);
+    NSLog(@"%s feed re-armed after the picked video changed", kMyVCamC1CPrefix);
+}
+
+void MyVCamPickerSetDisabled(int disabled) {
+    __atomic_store_n(&gMyVCamPickerDisabled, disabled ? 1 : 0, __ATOMIC_RELAXED);
+    if (disabled) {
+        dispatch_async(gEnableQueue, ^{
+            [[MyVCamManager sharedManager] detachMediaFile];
+            NSLog(@"%s feed disabled, real camera restored", kMyVCamC1CPrefix);
+        });
+        return;
+    }
+    MyVCamPickerVideoDidChange();
 }
 
 static void MyVCamC1C_LogFileProbe(const char *role, const char *path) {
