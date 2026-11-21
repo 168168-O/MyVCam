@@ -22,6 +22,18 @@ void MyVCamPickerInstall(void);
 /// Always inside the calling process' own container.
 NSURL *_Nullable MyVCamPickerPreferredVideoURL(void);
 
+/// Absolute path of the cloned-voice file, or nil. Returns nil while the
+/// selected audio mode is the video's own track, so the audio injector falls
+/// back to the video automatically.
+NSURL *_Nullable MyVCamPickerPreferredAudioURL(void);
+
+/// 0 = the video's own audio track, 1 = the cloned-voice file.
+int MyVCamPickerAudioMode(void);
+void MyVCamPickerSetAudioMode(int mode);
+
+/// Called by the picker after a voice file is added, replaced, or removed.
+void MyVCamPickerAudioDidChange(void);
+
 /// Called by the picker after a new video lands in the sandbox. Re-arms the
 /// running capture session so the user does not have to reopen the camera.
 void MyVCamPickerVideoDidChange(void);
