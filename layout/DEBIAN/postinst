@@ -101,7 +101,7 @@ if [ -x "$MIRROR" ]; then
         mach=*) mach_line=$probed ;;
     esac
 fi
-printf 'version=0.2.20 timestamp=%s exit=0 euid=%s substrate=%s framework=%s tweak_inject=%s dynamic_libs=%s plist_inject=%s eksafemode=%s %s\n' \
+printf 'version=0.2.21 timestamp=%s exit=0 euid=%s substrate=%s framework=%s tweak_inject=%s dynamic_libs=%s plist_inject=%s eksafemode=%s %s\n' \
     "$ts" "$euid" "$substr" "$fw" "$inj" "$dyn" "$plist_inj" "$safe" "$mach_line" >"$MARK" || true
 chmod 0644 "$MARK" 2>/dev/null || true
 exit 0
