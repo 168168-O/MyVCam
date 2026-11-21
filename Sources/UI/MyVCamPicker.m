@@ -20,14 +20,21 @@
 
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString * const kMyVCamPickerDirName = @"MyVCam";
 static NSString * const kMyVCamPickerFileName = @"test.mp4";
+static NSString * const kMyVCamPickerVoiceBaseName = @"voice";
+static NSString * const kMyVCamPickerModeFileName = @"audio.mode";
 
 static UIWindow *gMyVCamPickerWindow = nil;
 static id gMyVCamPickerDelegate = nil;
 static id gMyVCamPickerButtonController = nil;
+static id gMyVCamPickerAudioDelegate = nil;
+static UIButton *gMyVCamPickerAudioButton = nil;
 static NSInteger gMyVCamPickerAttempts = 0;
+
+static void MyVCamPickerAudioButtonRefresh(void);
 
 #pragma mark - Paths
 
@@ -60,6 +67,106 @@ NSURL *MyVCamPickerPreferredVideoURL(void) {
         return nil;
     }
     return url;
+}
+
+#pragma mark - Audio source
+
+static NSArray<NSString *> *MyVCamPickerVoiceExtensions(void) {
+    return @[@"m4a", @"mp3", @"wav", @"caf", @"aac", @"aiff", @"flac"];
+}
+
+static NSURL *MyVCamPickerVoiceURL(void) {
+    NSURL *directory = MyVCamPickerVideoDirectory();
+    if (directory == nil) {
+        return nil;
+    }
+    NSFileManager *manager = [NSFileManager defaultManager];
+    for (NSString *extension in MyVCamPickerVoiceExtensions()) {
+        NSString *name = [NSString stringWithFormat:@"%@.%@",
+                          kMyVCamPickerVoiceBaseName,
+                          extension];
+        NSURL *url = [directory URLByAppendingPathComponent:name isDirectory:NO];
+        if ([manager fileExistsAtPath:url.path]) {
+            return url;
+        }
+    }
+    return nil;
+}
+
+static void MyVCamPickerRemoveVoice(void) {
+    NSURL *directory = MyVCamPickerVideoDirectory();
+    if (directory == nil) {
+        return;
+    }
+    NSFileManager *manager = [NSFileManager defaultManager];
+    for (NSString *extension in MyVCamPickerVoiceExtensions()) {
+        NSString *name = [NSString stringWithFormat:@"%@.%@",
+                          kMyVCamPickerVoiceBaseName,
+                          extension];
+        [manager removeItemAtURL:[directory URLByAppendingPathComponent:name isDirectory:NO]
+                          error:NULL];
+    }
+}
+
+static NSURL *MyVCamPickerModeURL(void) {
+    NSURL *directory = MyVCamPickerVideoDirectory();
+    if (directory == nil) {
+        return nil;
+    }
+    return [directory URLByAppendingPathComponent:kMyVCamPickerModeFileName isDirectory:NO];
+}
+
+int MyVCamPickerAudioMode(void) {
+    NSURL *url = MyVCamPickerModeURL();
+    if (url == nil) {
+        return 0;
+    }
+    NSString *value = [NSString stringWithContentsOfURL:url
+                                               encoding:NSUTF8StringEncoding
+                                                  error:NULL];
+    value = [value stringByTrimmingCharactersInSet:
+                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([value isEqualToString:@"voice"] && MyVCamPickerVoiceURL() != nil) {
+        return 1;
+    }
+    return 0;
+}
+
+void MyVCamPickerSetAudioMode(int mode) {
+    if (mode != 0) {
+        mode = 1;
+    }
+    if (mode == 1 && MyVCamPickerVoiceURL() == nil) {
+        mode = 0;
+    }
+    NSURL *url = MyVCamPickerModeURL();
+    if (url == nil) {
+        return;
+    }
+    [[NSFileManager defaultManager] createDirectoryAtURL:url.URLByDeletingLastPathComponent
+                             withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:NULL];
+    NSString *value = mode == 1 ? @"voice" : @"video";
+    [value writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
+NSURL *MyVCamPickerPreferredAudioURL(void) {
+    if (MyVCamPickerAudioMode() != 1) {
+        return nil;
+    }
+    return MyVCamPickerVoiceURL();
+}
+
+static void MyVCamPickerAudioButtonRefresh(void) {
+    UIButton *button = gMyVCamPickerAudioButton;
+    if (button == nil) {
+        return;
+    }
+    BOOL voice = MyVCamPickerAudioMode() == 1;
+    UIColor *color = voice ? UIColor.systemOrangeColor : UIColor.systemPurpleColor;
+    [button setTitle:voice ? @"声*" : @"声" forState:UIControlStateNormal];
+    button.backgroundColor = [color colorWithAlphaComponent:0.82];
 }
 
 #pragma mark - Toast
@@ -161,6 +268,74 @@ static void MyVCamPickerToast(NSString *text) {
 
 @end
 
+#pragma mark - Audio picker delegate
+
+@interface MyVCamAudioPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@end
+
+@implementation MyVCamAudioPickerDelegate
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+    didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    [controller dismissViewControllerAnimated:YES completion:nil];
+
+    NSURL *source = urls.firstObject;
+    if (source == nil) {
+        return;
+    }
+    NSURL *directory = MyVCamPickerVideoDirectory();
+    if (directory == nil) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MyVCamPickerToast(@"沙盒路径不可用");
+        });
+        return;
+    }
+
+    NSString *extension = source.pathExtension.lowercaseString;
+    if (![MyVCamPickerVoiceExtensions() containsObject:extension]) {
+        extension = @"m4a";
+    }
+    NSFileManager *manager = [NSFileManager defaultManager];
+    [manager createDirectoryAtURL:directory
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:NULL];
+    NSURL *destination = [directory URLByAppendingPathComponent:
+                             [NSString stringWithFormat:@"%@.%@",
+                              kMyVCamPickerVoiceBaseName,
+                              extension]
+                                                      isDirectory:NO];
+
+    BOOL scoped = [source startAccessingSecurityScopedResource];
+    MyVCamPickerRemoveVoice();
+    [manager removeItemAtURL:destination error:NULL];
+    NSError *copyError = nil;
+    BOOL copied = [manager copyItemAtURL:source toURL:destination error:&copyError];
+    if (scoped) {
+        [source stopAccessingSecurityScopedResource];
+    }
+
+    if (copied) {
+        MyVCamPickerSetAudioMode(1);
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (copied) {
+            MyVCamPickerAudioButtonRefresh();
+            MyVCamPickerAudioDidChange();
+            MyVCamPickerToast(@"已切换为克隆声音");
+        } else {
+            MyVCamPickerToast(@"保存音频失败，换个文件试试");
+            NSLog(@"[MyVCam Picker] audio copy failed: %@", copyError);
+        }
+    });
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    [controller dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
 #pragma mark - Window helpers
 
 static UIWindowScene *MyVCamPickerActiveScene(void) {
@@ -217,20 +392,22 @@ static UIViewController *MyVCamPickerTopViewController(UIWindowScene *scene) {
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
     UIView *button = gesture.view;
-    UIWindow *window = button.window;
+    // Both buttons share a panel; the VC button drags the panel.
+    UIView *panel = button.superview ?: button;
+    UIWindow *window = panel.window;
     if (button == nil || window == nil) {
         return;
     }
     CGPoint translation = [gesture translationInView:window];
-    CGPoint center = button.center;
+    CGPoint center = panel.center;
     center.x += translation.x;
     center.y += translation.y;
 
-    CGFloat halfWidth = button.bounds.size.width / 2.0;
-    CGFloat halfHeight = button.bounds.size.height / 2.0;
+    CGFloat halfWidth = CGRectGetWidth(panel.bounds) / 2.0;
+    CGFloat halfHeight = CGRectGetHeight(panel.bounds) / 2.0;
     center.x = MAX(halfWidth + 6.0, MIN(window.bounds.size.width - halfWidth - 6.0, center.x));
     center.y = MAX(halfHeight + 40.0, MIN(window.bounds.size.height - halfHeight - 40.0, center.y));
-    button.center = center;
+    panel.center = center;
     [gesture setTranslation:CGPointZero inView:window];
 }
 
@@ -265,6 +442,113 @@ static UIViewController *MyVCamPickerTopViewController(UIWindowScene *scene) {
     [presenter presentViewController:picker animated:YES completion:nil];
 }
 
+#pragma mark - Audio button
+
+- (void)handleAudioTap:(UIButton *)sender {
+    [self presentAudioMenuFromView:sender];
+}
+
+- (void)handleAudioLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) {
+        return;
+    }
+    if (MyVCamPickerVoiceURL() == nil) {
+        MyVCamPickerToast(@"还没有克隆声音文件，先点“声”导入");
+        return;
+    }
+    int next = MyVCamPickerAudioMode() == 1 ? 0 : 1;
+    MyVCamPickerSetAudioMode(next);
+    MyVCamPickerAudioButtonRefresh();
+    MyVCamPickerAudioDidChange();
+    MyVCamPickerToast(next == 1 ? @"声音：克隆声音" : @"声音：视频原声");
+}
+
+- (void)presentAudioMenuFromView:(UIView *)view {
+    UIWindowScene *scene = MyVCamPickerActiveScene();
+    UIViewController *presenter = scene != nil ? MyVCamPickerTopViewController(scene) : nil;
+    if (presenter == nil) {
+        MyVCamPickerToast(@"当前界面无法弹出菜单");
+        return;
+    }
+
+    BOOL hasVoice = MyVCamPickerVoiceURL() != nil;
+    BOOL voiceMode = MyVCamPickerAudioMode() == 1;
+    UIAlertController *sheet =
+        [UIAlertController alertControllerWithTitle:@"声音来源"
+                                            message:@"视频原声 = 视频自带的音轨；克隆声音 = 你导入的音频文件"
+                                     preferredStyle:UIAlertControllerStyleActionSheet];
+
+    NSString *videoTitle = voiceMode ? @"使用视频原声" : @"使用视频原声（当前）";
+    [sheet addAction:[UIAlertAction actionWithTitle:videoTitle
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        (void)action;
+        MyVCamPickerSetAudioMode(0);
+        MyVCamPickerAudioButtonRefresh();
+        MyVCamPickerAudioDidChange();
+        MyVCamPickerToast(@"声音：视频原声");
+    }]];
+
+    if (hasVoice) {
+        NSString *voiceTitle = voiceMode ? @"使用克隆声音（当前）" : @"使用克隆声音";
+        [sheet addAction:[UIAlertAction actionWithTitle:voiceTitle
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            (void)action;
+            MyVCamPickerSetAudioMode(1);
+            MyVCamPickerAudioButtonRefresh();
+            MyVCamPickerAudioDidChange();
+            MyVCamPickerToast(@"声音：克隆声音");
+        }]];
+    }
+
+    NSString *importTitle = hasVoice ? @"更换克隆声音文件…" : @"导入克隆声音文件…";
+    [sheet addAction:[UIAlertAction actionWithTitle:importTitle
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        (void)action;
+        [self presentAudioPicker];
+    }]];
+
+    if (hasVoice) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"移除克隆声音"
+                                                  style:UIAlertActionStyleDestructive
+                                                handler:^(UIAlertAction *action) {
+            (void)action;
+            MyVCamPickerRemoveVoice();
+            MyVCamPickerSetAudioMode(0);
+            MyVCamPickerAudioButtonRefresh();
+            MyVCamPickerAudioDidChange();
+            MyVCamPickerToast(@"已移除克隆声音，恢复视频原声");
+        }]];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    sheet.popoverPresentationController.sourceView = view;
+    sheet.popoverPresentationController.sourceRect = view.bounds;
+    [presenter presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)presentAudioPicker {
+    UIWindowScene *scene = MyVCamPickerActiveScene();
+    UIViewController *presenter = scene != nil ? MyVCamPickerTopViewController(scene) : nil;
+    if (presenter == nil) {
+        MyVCamPickerToast(@"当前界面无法打开文件");
+        return;
+    }
+
+    UIDocumentPickerViewController *picker =
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeAudio]
+                                                                   asCopy:YES];
+    picker.allowsMultipleSelection = NO;
+    MyVCamAudioPickerDelegate *delegate = [[MyVCamAudioPickerDelegate alloc] init];
+    picker.delegate = delegate;
+    gMyVCamPickerAudioDelegate = delegate;
+    [presenter presentViewController:picker animated:YES completion:nil];
+}
+
 @end
 
 #pragma mark - Install
@@ -286,6 +570,12 @@ static void MyVCamPickerAttachButton(void) {
     MyVCamPickerButtonController *controller = [[MyVCamPickerButtonController alloc] init];
     gMyVCamPickerButtonController = controller;
 
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(window.bounds.size.width - 66.0,
+                                                             window.bounds.size.height * 0.5,
+                                                             48.0,
+                                                             104.0)];
+    panel.backgroundColor = UIColor.clearColor;
+
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     [button setTitle:@"VC" forState:UIControlStateNormal];
     [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
@@ -293,10 +583,7 @@ static void MyVCamPickerAttachButton(void) {
     button.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.82];
     button.layer.cornerRadius = 24.0;
     button.layer.masksToBounds = YES;
-    button.frame = CGRectMake(window.bounds.size.width - 66.0,
-                              window.bounds.size.height * 0.5,
-                              48.0,
-                              48.0);
+    button.frame = CGRectMake(0.0, 0.0, 48.0, 48.0);
     [button addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:controller
                                                                         action:@selector(handlePan:)]];
     UILongPressGestureRecognizer *longPress =
@@ -308,10 +595,29 @@ static void MyVCamPickerAttachButton(void) {
                action:@selector(handleTap:)
      forControlEvents:UIControlEventTouchUpInside];
 
-    [window.rootViewController.view addSubview:button];
+    UIButton *audioButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    audioButton.frame = CGRectMake(0.0, 56.0, 48.0, 48.0);
+    audioButton.layer.cornerRadius = 24.0;
+    audioButton.layer.masksToBounds = YES;
+    [audioButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    audioButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+    UILongPressGestureRecognizer *audioLongPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:controller
+                                                      action:@selector(handleAudioLongPress:)];
+    audioLongPress.minimumPressDuration = 0.6;
+    [audioButton addGestureRecognizer:audioLongPress];
+    [audioButton addTarget:controller
+                    action:@selector(handleAudioTap:)
+          forControlEvents:UIControlEventTouchUpInside];
+    gMyVCamPickerAudioButton = audioButton;
+    MyVCamPickerAudioButtonRefresh();
+
+    [panel addSubview:button];
+    [panel addSubview:audioButton];
+    [window.rootViewController.view addSubview:panel];
     gMyVCamPickerWindow = window;
 
-    NSLog(@"[MyVCam Picker] button installed");
+    NSLog(@"[MyVCam Picker] buttons installed, audio_mode=%d", MyVCamPickerAudioMode());
 }
 
 void MyVCamPickerInstall(void) {
