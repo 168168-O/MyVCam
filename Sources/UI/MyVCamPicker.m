@@ -33,6 +33,18 @@
 }
 @end
 
+// 关键：命中测试返回 nil 的必须是窗口本身。UIWindow 在空白处会把自己
+// 当成命中结果，只改 root view 不够，触摸仍会被这层全屏窗口吞掉。
+@interface MyVCamPassthroughWindow : UIWindow
+@end
+
+@implementation MyVCamPassthroughWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
+}
+@end
+
 static NSString * const kMyVCamPickerDirName = @"MyVCam";
 static NSString * const kMyVCamPickerFileName = @"test.mp4";
 static NSString * const kMyVCamPickerVoiceBaseName = @"voice";
@@ -570,7 +582,7 @@ static void MyVCamPickerAttachButton(void) {
         return;
     }
 
-    UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
+    MyVCamPassthroughWindow *window = [[MyVCamPassthroughWindow alloc] initWithWindowScene:scene];
     window.frame = scene.coordinateSpace.bounds;
     window.windowLevel = UIWindowLevelAlert + 1;
     window.backgroundColor = UIColor.clearColor;
