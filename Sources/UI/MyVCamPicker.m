@@ -22,6 +22,17 @@
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+// 全屏浮窗必须做点击穿透：空白处返回 nil，触摸才会落到下层 App 上。
+@interface MyVCamPassthroughView : UIView
+@end
+
+@implementation MyVCamPassthroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
+}
+@end
+
 static NSString * const kMyVCamPickerDirName = @"MyVCam";
 static NSString * const kMyVCamPickerFileName = @"test.mp4";
 static NSString * const kMyVCamPickerVoiceBaseName = @"voice";
@@ -563,8 +574,10 @@ static void MyVCamPickerAttachButton(void) {
     window.frame = scene.coordinateSpace.bounds;
     window.windowLevel = UIWindowLevelAlert + 1;
     window.backgroundColor = UIColor.clearColor;
-    window.rootViewController = [[UIViewController alloc] init];
-    window.rootViewController.view.backgroundColor = UIColor.clearColor;
+    UIViewController *root = [[UIViewController alloc] init];
+    root.view = [[MyVCamPassthroughView alloc] initWithFrame:window.bounds];
+    root.view.backgroundColor = UIColor.clearColor;
+    window.rootViewController = root;
     window.hidden = NO;
 
     MyVCamPickerButtonController *controller = [[MyVCamPickerButtonController alloc] init];
