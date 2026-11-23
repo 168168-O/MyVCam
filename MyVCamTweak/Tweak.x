@@ -1774,6 +1774,65 @@ static void MyVCamC1C_ScheduleEnable(uint64_t generation) {
     });
 }
 
+// Temporary on-screen diagnostics. Used only to find which capture path an
+// app uses; remove once the capture path is understood. At most eight lines
+// per process, deduplicated by text.
+static void MyVCamDiag_ToastOnce(NSString *text) {
+    static NSMutableSet *seen = nil;
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    if (text.length == 0) {
+        return;
+    }
+    BOOL show = NO;
+    os_unfair_lock_lock(&lock);
+    if (seen == nil) {
+        seen = [NSMutableSet set];
+    }
+    if (seen.count < 8 && ![seen containsObject:text]) {
+        [seen addObject:text];
+        show = YES;
+    }
+    os_unfair_lock_unlock(&lock);
+    if (show) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MyVCamPickerShowToast(text);
+        });
+    }
+}
+
+static NSString *MyVCamDiag_FourCC(CMSampleBufferRef sampleBuffer) {
+    CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (format == NULL) {
+        return @"?";
+    }
+    OSType code = CMFormatDescriptionGetMediaSubType(format);
+    char text[5];
+    text[0] = (char)((code >> 24) & 0xff);
+    text[1] = (char)((code >> 16) & 0xff);
+    text[2] = (char)((code >> 8) & 0xff);
+    text[3] = (char)(code & 0xff);
+    text[4] = '\0';
+    for (int i = 0; i < 4; i++) {
+        if (text[i] < 32 || text[i] > 126) {
+            text[i] = '?';
+        }
+    }
+    return [NSString stringWithUTF8String:text];
+}
+
+static void MyVCamDiag_ToastVideo(CMSampleBufferRef origin, BOOL replaced, NSString *detail) {
+    CVImageBufferRef image = CMSampleBufferGetImageBuffer(origin);
+    size_t width = image != NULL ? CVPixelBufferGetWidth(image) : 0;
+    size_t height = image != NULL ? CVPixelBufferGetHeight(image) : 0;
+    NSString *text = [NSString stringWithFormat:@"%@ %@ %zux%zu%@",
+                      replaced ? @"视频已替换" : @"视频未替换",
+                      MyVCamDiag_FourCC(origin),
+                      width,
+                      height,
+                      detail.length > 0 ? [@" " stringByAppendingString:detail] : @""];
+    MyVCamDiag_ToastOnce(text);
+}
+
 static void MyVCamC1A_Deliver(id self,
                               SEL _cmd,
                               AVCaptureOutput *output,
@@ -1810,6 +1869,8 @@ static void MyVCamC1A_Deliver(id self,
             NSLog(@"%s audio replacement skipped: %@", kMyVCamC1BPrefix, exception);
         }
         if (replaced != NULL) {
+            MyVCamDiag_ToastOnce([NSString stringWithFormat:@"音频已替换 %ld 帧",
+                                  (long)CMSampleBufferGetNumSamples(replaced)]);
             ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, replaced, connection);
             CFRelease(replaced);
             return;
@@ -1825,6 +1886,7 @@ static void MyVCamC1A_Deliver(id self,
 
     CMSampleBufferRef published = MyVCamC1B_CopyPublished(generation);
     if (published == NULL) {
+        MyVCamDiag_ToastVideo(sampleBuffer, NO, @"wait");
         MyVCamC1B_LogPathOnce(NO);
         ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
         MyVCamC1B_NoteVideoOrigin(sampleBuffer, generation);
@@ -1833,6 +1895,7 @@ static void MyVCamC1A_Deliver(id self,
 
     if (!MyVCamC1B_OriginIsVideoImage(sampleBuffer)) {
         CFRelease(published);
+        MyVCamDiag_ToastVideo(sampleBuffer, NO, @"not-video");
         ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
         return;
     }
@@ -1840,6 +1903,7 @@ static void MyVCamC1A_Deliver(id self,
     CMSampleBufferRef restamped = MyVCamC1B_Restamp(published, sampleBuffer);
     CFRelease(published);
     if (restamped == NULL) {
+        MyVCamDiag_ToastVideo(sampleBuffer, NO, @"restamp");
         MyVCamC1B_LogPathOnce(NO);
         ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, sampleBuffer, connection);
         MyVCamC1B_NoteVideoOrigin(sampleBuffer, generation);
@@ -1847,6 +1911,7 @@ static void MyVCamC1A_Deliver(id self,
     }
 
     MyVCamC1B_LogPathOnce(YES);
+    MyVCamDiag_ToastVideo(sampleBuffer, YES, nil);
     ((MyVCamC1ACaptureOutputIMP)original)(self, _cmd, output, restamped, connection);
     MyVCamC1B_StoreHandoff(restamped);
     MyVCamC1B_NoteVideoOrigin(sampleBuffer, generation);
@@ -1977,6 +2042,10 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
 - (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
     // Let AVFoundation finish the setter before the class is mutated.
     %orig;
+    if (sampleBufferDelegate != nil) {
+        MyVCamDiag_ToastOnce([NSString stringWithFormat:@"探测：视频输出 %@",
+                              NSStringFromClass(object_getClass(sampleBufferDelegate))]);
+    }
     MyVCamC1A_HookDelegateIfNeeded(sampleBufferDelegate);
 }
 
@@ -1988,7 +2057,31 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
     // The audio delegate often differs from the video delegate class, so the
     // same hook has to be installed on whichever class implements it here.
     %orig;
+    if (sampleBufferDelegate != nil) {
+        MyVCamDiag_ToastOnce([NSString stringWithFormat:@"探测：音频输出 %@",
+                              NSStringFromClass(object_getClass(sampleBufferDelegate))]);
+    }
     MyVCamC1A_HookDelegateIfNeeded(sampleBufferDelegate);
+}
+
+%end
+
+%hook AVCaptureMovieFileOutput
+
+- (void)startRecordingToOutputFileURL:(NSURL *)outputFileURL
+                    recordingDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
+    MyVCamDiag_ToastOnce(@"探测：录制走 MovieFileOutput");
+    %orig;
+}
+
+%end
+
+%hook AVCapturePhotoOutput
+
+- (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings
+                        delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    MyVCamDiag_ToastOnce(@"探测：拍照走 PhotoOutput");
+    %orig;
 }
 
 %end
