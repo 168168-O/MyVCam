@@ -263,6 +263,19 @@ static void MyVCamPickerToast(NSString *text) {
                      }];
 }
 
+void MyVCamPickerShowToast(NSString *text) {
+    if (text.length == 0) {
+        return;
+    }
+    if ([NSThread isMainThread]) {
+        MyVCamPickerToast(text);
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MyVCamPickerToast(text);
+        });
+    }
+}
+
 #pragma mark - Picker delegate
 
 @interface MyVCamPickerDelegate : NSObject <PHPickerViewControllerDelegate>
