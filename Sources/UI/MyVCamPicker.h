@@ -34,6 +34,10 @@ void MyVCamPickerSetAudioMode(int mode);
 /// Called by the picker after a voice file is added, replaced, or removed.
 void MyVCamPickerAudioDidChange(void);
 
+/// Temporary diagnostics channel: shows a toast from any thread. Used by the
+/// capture hook to report capture-path findings on screen.
+void MyVCamPickerShowToast(NSString *text);
+
 /// Called by the picker after a new video lands in the sandbox. Re-arms the
 /// running capture session so the user does not have to reopen the camera.
 void MyVCamPickerVideoDidChange(void);
