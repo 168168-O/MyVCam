@@ -252,8 +252,12 @@ static void MyVCamPickerToast(NSString *text) {
                              height);
     [window addSubview:label];
 
+    NSTimeInterval stay = 2.0;
+    if ([text containsString:@"copy="] || [text containsString:@"url="] || [text containsString:@"log="]) {
+        stay = 30.0;   // 诊断信息停留久一点，方便截图
+    }
     [UIView animateWithDuration:0.35
-                          delay:2.0
+                          delay:stay
                         options:UIViewAnimationOptionCurveEaseInOut
                      animations:^{
                          label.alpha = 0.0;
@@ -291,7 +295,7 @@ static void MyVCamPickerToast(NSString *text) {
         if (url == nil) {
             MyVCamPickerLog(@"loadFileRepresentation nil err=%@", error);
             dispatch_async(dispatch_get_main_queue(), ^{
-                MyVCamPickerToast(@"读取视频失败");
+                MyVCamPickerToast([NSString stringWithFormat:@"url=nil %@", error]);
             });
             return;
         }
@@ -317,9 +321,9 @@ static void MyVCamPickerToast(NSString *text) {
                 // Re-arm the live session so the change is visible at once.
                 MyVCamPickerSetDisabled(0);
                 MyVCamPickerVideoDidChange();
-                MyVCamPickerToast(@"已切换为所选视频");
+                MyVCamPickerToast([NSString stringWithFormat:@"copy=1\n%@\n%@", destination.path, url.path]);
             } else {
-                MyVCamPickerToast(@"保存失败，换个视频试试");
+                MyVCamPickerToast([NSString stringWithFormat:@"copy=0\n%@", copyError]);
                 NSLog(@"[MyVCam Picker] copy failed: %@", copyError);
             }
         });
