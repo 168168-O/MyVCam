@@ -71,6 +71,15 @@
 //  button: tap opens a menu (video audio / cloned voice / import or remove
 //  the voice file), long press toggles the two modes.
 //
+//  0.2.21 recording: AVCaptureFileOutput startRecordingToOutputFileURL: is
+//  hooked to learn the recording delegate. When the delegate reports a
+//  finished file, the file is replaced with the picked video trimmed to the
+//  recorded duration (passthrough export) before the app's delegate runs.
+//  This covers apps that preview through a video data output but record
+//  through AVCaptureMovieFileOutput, where the data-output hook never sees
+//  the recorded frames. The replacement is skipped while the tweak is
+//  disabled and keeps the real recording when the export fails.
+//
 //  MyVCamTweak.plist matches com.apple.camera, Camera, com.apple.springboard,
 //  SpringBoard, com.apple.Preferences, and Preferences. The plist has no XML
 //  comments: ElleKit skips a tweak when CFPropertyListCreateWithData fails.
@@ -1485,6 +1494,8 @@ static void MyVCamAudio_Configure(NSURL *videoURL) {
     [[AudioInjector sharedInjector] setSidecarURL:voiceURL videoURL:videoURL];
 }
 
+static void MyVCamDiag_ToastOnce(NSString *text);
+
 static BOOL MyVCamC1C_SessionDidStart(uint64_t generation) {
     // Runs on com.myvcam.enable, off the capture delegate queue and off
     // -startRunning. A missing file returns NO and does not arm the timer.
@@ -1501,6 +1512,7 @@ static BOOL MyVCamC1C_SessionDidStart(uint64_t generation) {
     const char *readable = MyVCamC1C_ReadableVideoPath(&videoErrno);
     if (readable == NULL) {
         MyVCamStatus_SetFeed("", videoErrno, "not_readable", -1, 1);
+        MyVCamDiag_ToastOnce([NSString stringWithFormat:@"路径读不到 errno=%d", videoErrno]);
         NSLog(@"%s feed not started: test video not readable path=%s mirror=%s errno=%d",
               kMyVCamC1CPrefix,
               MyVCamManagerTestVideoPathUTF8,
@@ -1529,9 +1541,11 @@ static BOOL MyVCamC1C_SessionDidStart(uint64_t generation) {
     if (!started) {
         const char *message = error.localizedDescription.UTF8String;
         MyVCamStatus_SetFeed(readable, 0, message != NULL ? message : "prepare_failed", -1, 1);
+        MyVCamDiag_ToastOnce([NSString stringWithFormat:@"启动失败 %@", error.localizedDescription]);
         NSLog(@"%s feed not started path=%s error=%@", kMyVCamC1CPrefix, readable, error);
         return NO;
     }
+    MyVCamDiag_ToastOnce([NSString stringWithFormat:@"feed started %s", readable]);
     os_unfair_lock_lock(&gLock);
     if (gCaptureSessionRunning && gSessionGeneration == generation) {
         gPhase = MyVCamPhaseLive;
@@ -2037,6 +2051,227 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
     NSLog(@"%s hooked captureOutput:didOutputSampleBuffer:fromConnection: on %@", kMyVCamC1APrefix, NSStringFromClass(implClass));
 }
 
+#pragma mark - Movie file output (recording path)
+
+// Some apps preview through AVCaptureVideoDataOutput but record or send
+// through AVCaptureMovieFileOutput, which never calls the data-output
+// delegate. For those apps the recorded file is swapped for the picked video
+// after AVFoundation finishes writing it, before the app's delegate runs.
+//
+// Only the file on disk changes. The real recording still happens, so
+// -isRecording, recordedDuration, and the delegate error semantics stay intact.
+// The replacement is trimmed to the recorded duration and, with a passthrough
+// export, keeps whatever audio track the picked video has.
+
+typedef void (*MyVCamMovieFinishIMP)(id, SEL, AVCaptureFileOutput *, NSURL *, NSArray *, NSError *);
+
+typedef struct {
+    Class cls;
+    IMP imp;
+} MyVCamMovieOriginal;
+
+static MyVCamMovieOriginal *gMovieOriginals = NULL;
+static unsigned gMovieOriginalCount = 0;
+static unsigned gMovieOriginalCapacity = 0;
+static os_unfair_lock gMovieLock = OS_UNFAIR_LOCK_INIT;
+
+static IMP MyVCamMovie_FindOriginal(Class cls) {
+    if (cls == Nil) {
+        return NULL;
+    }
+    IMP imp = NULL;
+    os_unfair_lock_lock(&gMovieLock);
+    for (unsigned i = 0; i < gMovieOriginalCount; i++) {
+        if (gMovieOriginals[i].cls == cls) {
+            imp = gMovieOriginals[i].imp;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&gMovieLock);
+    return imp;
+}
+
+static BOOL MyVCamMovie_StoreOriginal(Class cls, IMP imp) {
+    if (cls == Nil || imp == NULL) {
+        return NO;
+    }
+    os_unfair_lock_lock(&gMovieLock);
+    for (unsigned i = 0; i < gMovieOriginalCount; i++) {
+        if (gMovieOriginals[i].cls == cls) {
+            gMovieOriginals[i].imp = imp;
+            os_unfair_lock_unlock(&gMovieLock);
+            return YES;
+        }
+    }
+    if (gMovieOriginalCount == gMovieOriginalCapacity) {
+        unsigned capacity = gMovieOriginalCapacity == 0 ? 4 : gMovieOriginalCapacity * 2;
+        MyVCamMovieOriginal *grown =
+            realloc(gMovieOriginals, (size_t)capacity * sizeof(MyVCamMovieOriginal));
+        if (grown == NULL) {
+            os_unfair_lock_unlock(&gMovieLock);
+            return NO;
+        }
+        gMovieOriginals = grown;
+        gMovieOriginalCapacity = capacity;
+    }
+    gMovieOriginals[gMovieOriginalCount].cls = cls;
+    gMovieOriginals[gMovieOriginalCount].imp = imp;
+    gMovieOriginalCount += 1;
+    os_unfair_lock_unlock(&gMovieLock);
+    return YES;
+}
+
+static BOOL MyVCamMovie_FeedEnabled(void) {
+    os_unfair_lock_lock(&gLock);
+    BOOL enabled = gCaptureSessionRunning && gPhase != MyVCamPhaseDisabled;
+    os_unfair_lock_unlock(&gLock);
+    return enabled;
+}
+
+static NSURL *MyVCamMovie_SourceURL(void) {
+    NSURL *url = MyVCamPickerPreferredVideoURL();
+    if (url != nil) {
+        return url;
+    }
+    const char *path = MyVCamC1C_ReadableVideoPath(NULL);
+    if (path == NULL) {
+        return nil;
+    }
+    return [NSURL fileURLWithPath:[NSString stringWithUTF8String:path] isDirectory:NO];
+}
+
+static BOOL MyVCamMovie_ReplaceRecordedFile(NSURL *targetURL) {
+    if (targetURL.path.length == 0) {
+        return NO;
+    }
+    NSFileManager *manager = [NSFileManager defaultManager];
+    if (![manager fileExistsAtPath:targetURL.path]) {
+        return NO;
+    }
+    NSURL *sourceURL = MyVCamMovie_SourceURL();
+    if (sourceURL == nil || ![manager fileExistsAtPath:sourceURL.path]) {
+        return NO;
+    }
+
+    CMTime recordedDuration = kCMTimeZero;
+    @try {
+        AVURLAsset *recorded = [AVURLAsset URLAssetWithURL:targetURL options:nil];
+        recordedDuration = recorded.duration;
+    } @catch (NSException *exception) {
+        recordedDuration = kCMTimeZero;
+    }
+
+    NSString *extension = targetURL.pathExtension.lowercaseString;
+    if (extension.length == 0) {
+        extension = @"mp4";
+    }
+    AVFileType fileType = [extension isEqualToString:@"mov"] ? AVFileTypeQuickTimeMovie
+                                                             : AVFileTypeMPEG4;
+    NSURL *tempURL = [[targetURL URLByDeletingLastPathComponent]
+        URLByAppendingPathComponent:[NSString stringWithFormat:@"myvcam-%@.%@",
+                                     [NSUUID UUID].UUIDString,
+                                     extension]
+                        isDirectory:NO];
+    [manager removeItemAtURL:tempURL error:NULL];
+
+    BOOL exported = NO;
+    @try {
+        AVURLAsset *source = [AVURLAsset URLAssetWithURL:sourceURL options:nil];
+        AVAssetExportSession *export =
+            [[AVAssetExportSession alloc] initWithAsset:source
+                                          presetName:AVAssetExportPresetPassthrough];
+        if (export != nil) {
+            export.outputURL = tempURL;
+            export.outputFileType = fileType;
+            export.shouldOptimizeForNetworkUse = NO;
+            if (CMTIME_IS_VALID(recordedDuration) &&
+                CMTimeCompare(recordedDuration, kCMTimeZero) > 0) {
+                export.timeRange = CMTimeRangeMake(kCMTimeZero, recordedDuration);
+            }
+            dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+            [export exportAsynchronouslyWithCompletionHandler:^{
+                dispatch_semaphore_signal(semaphore);
+            }];
+            long waited = dispatch_semaphore_wait(
+                semaphore,
+                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+            exported = (waited == 0 &&
+                        export.status == AVAssetExportSessionStatusCompleted);
+            if (!exported) {
+                NSLog(@"[MyVCam Movie] export failed status=%ld waited=%ld error=%@",
+                      (long)export.status,
+                      waited,
+                      export.error);
+            }
+        }
+    } @catch (NSException *exception) {
+        exported = NO;
+        NSLog(@"[MyVCam Movie] export exception %@", exception);
+    }
+
+    if (!exported) {
+        [manager removeItemAtURL:tempURL error:NULL];
+        return NO;
+    }
+
+    [manager removeItemAtURL:targetURL error:NULL];
+    NSError *moveError = nil;
+    BOOL moved = [manager moveItemAtURL:tempURL toURL:targetURL error:&moveError];
+    if (!moved) {
+        NSLog(@"[MyVCam Movie] move failed error=%@", moveError);
+    }
+    return moved;
+}
+
+static void MyVCamMovie_DidFinish(id self,
+                                  SEL _cmd,
+                                  AVCaptureFileOutput *output,
+                                  NSURL *outputFileURL,
+                                  NSArray *connections,
+                                  NSError *error) {
+    IMP original = MyVCamMovie_FindOriginal(object_getClass(self));
+    if (original == NULL || original == (IMP)MyVCamMovie_DidFinish) {
+        return;
+    }
+
+    if (outputFileURL != nil && error == nil && MyVCamMovie_FeedEnabled()) {
+        @try {
+            BOOL replaced = MyVCamMovie_ReplaceRecordedFile(outputFileURL);
+            MyVCamDiag_ToastOnce(replaced ? @"录制已替换为所选视频"
+                                          : @"录制替换失败（保留真实录像）");
+        } @catch (NSException *exception) {
+            NSLog(@"[MyVCam Movie] replace exception %@", exception);
+        }
+    }
+
+    ((MyVCamMovieFinishIMP)original)(self, _cmd, output, outputFileURL, connections, error);
+}
+
+static void MyVCamMovie_HookDelegate(id delegate) {
+    if (delegate == nil) {
+        return;
+    }
+    Class cls = object_getClass(delegate);
+    if (cls == Nil) {
+        return;
+    }
+    SEL selector = @selector(captureOutput:didFinishRecordingToOutputFileURL:fromConnections:error:);
+    if (class_getInstanceMethod(cls, selector) == NULL) {
+        return;
+    }
+    if (MyVCamMovie_FindOriginal(cls) != NULL) {
+        return;
+    }
+    IMP original = NULL;
+    MSHookMessageEx(cls, selector, (IMP)MyVCamMovie_DidFinish, &original);
+    if (original == NULL) {
+        NSLog(@"[MyVCam Movie] failed to hook %@", NSStringFromClass(cls));
+        return;
+    }
+    MyVCamMovie_StoreOriginal(cls, original);
+    NSLog(@"[MyVCam Movie] hooked file-output delegate %@", NSStringFromClass(cls));
+}
+
 %hook AVCaptureVideoDataOutput
 
 - (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
@@ -2066,11 +2301,16 @@ static void MyVCamC1A_HookDelegateIfNeeded(id delegate) {
 
 %end
 
-%hook AVCaptureMovieFileOutput
+%hook AVCaptureFileOutput
 
 - (void)startRecordingToOutputFileURL:(NSURL *)outputFileURL
                     recordingDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
-    MyVCamDiag_ToastOnce(@"探测：录制走 MovieFileOutput");
+    // Declared on AVCaptureFileOutput; only the movie output writes a file we
+    // can swap. Audio-only file outputs are left alone.
+    if ([self isKindOfClass:[AVCaptureMovieFileOutput class]]) {
+        MyVCamDiag_ToastOnce(@"探测：录制走 MovieFileOutput");
+        MyVCamMovie_HookDelegate(delegate);
+    }
     %orig;
 }
 
