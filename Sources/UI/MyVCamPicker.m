@@ -21,6 +21,39 @@
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <stdarg.h>
+
+// 诊断日志：写进 <Documents>/MyVCam/picker.log，用 Filza 就能直接看。
+static void MyVCamPickerLog(NSString *format, ...) {
+    @autoreleasepool {
+        NSArray<NSString *> *paths =
+            NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *documents = paths.firstObject;
+        if (documents.length == 0) {
+            return;
+        }
+        NSString *dir = [documents stringByAppendingPathComponent:@"MyVCam"];
+        NSString *file = [dir stringByAppendingPathComponent:@"picker.log"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        va_list args;
+        va_start(args, format);
+        NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+        va_end(args);
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:file]) {
+            [data writeToFile:file atomically:YES];
+        } else {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:file];
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
+        }
+    }
+}
 
 // 全屏浮窗必须做点击穿透：空白处返回 nil，触摸才会落到下层 App 上。
 @interface MyVCamPassthroughView : UIView
@@ -241,6 +274,8 @@ static void MyVCamPickerToast(NSString *text) {
     didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
 
+    MyVCamPickerLog(@"didFinishPicking results=%lu", (unsigned long)results.count);
+
     PHPickerResult *result = results.firstObject;
     if (result == nil) {
         return;
@@ -254,6 +289,7 @@ static void MyVCamPickerToast(NSString *text) {
     [provider loadFileRepresentationForTypeIdentifier:@"public.movie"
                                    completionHandler:^(NSURL *url, NSError *error) {
         if (url == nil) {
+            MyVCamPickerLog(@"loadFileRepresentation nil err=%@", error);
             dispatch_async(dispatch_get_main_queue(), ^{
                 MyVCamPickerToast(@"读取视频失败");
             });
@@ -275,6 +311,7 @@ static void MyVCamPickerToast(NSString *text) {
         [manager removeItemAtURL:destination error:NULL];
         NSError *copyError = nil;
         BOOL copied = [manager copyItemAtURL:url toURL:destination error:&copyError];
+        MyVCamPickerLog(@"copy=%d dest=%@ err=%@", copied, destination.path, copyError);
         dispatch_async(dispatch_get_main_queue(), ^{
             if (copied) {
                 // Re-arm the live session so the change is visible at once.
@@ -410,6 +447,7 @@ static UIViewController *MyVCamPickerTopViewController(UIWindowScene *scene) {
 
 - (void)handleTap:(UIButton *)sender {
     (void)sender;
+    MyVCamPickerLog(@"VC tap");
     [self presentPicker];
 }
 
@@ -463,6 +501,7 @@ static UIViewController *MyVCamPickerTopViewController(UIWindowScene *scene) {
     gMyVCamPickerDelegate = delegate;
 
     [presenter presentViewController:picker animated:YES completion:nil];
+    MyVCamPickerLog(@"present picker ok");
 }
 
 #pragma mark - Audio button
